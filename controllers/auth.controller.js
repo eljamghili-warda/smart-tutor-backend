@@ -29,11 +29,11 @@ const register = async (req, res) => {
       return res.status(409).json({ error: 'Email déjà utilisé' });
     }
 
-    const hash = await bcrypt.hash(motDePasse, 10);
+    // const hash = await bcrypt.hash(motDePasse, 10);
     const userResult = await client.query(
       `INSERT INTO utilisateurs (prenom, nom, email, mot_de_passe, role)
        VALUES ($1, $2, $3, $4, $5) RETURNING id, prenom, nom, email, role`,
-      [prenom, nom, email, hash, role]
+      [prenom, nom, email, motDePasse, role]
     );
     const user = userResult.rows[0];
 
@@ -82,14 +82,15 @@ const login = async (req, res) => {
       return res.status(403).json({ error: 'Compte bloqué. Contactez un administrateur.' });
     }
 
-    const validPass = await bcrypt.compare(motDePasse, user.mot_de_passe);
-    if (!validPass) {
-      await pool.query(
-        'UPDATE utilisateurs SET tentatives_connexion = tentatives_connexion + 1 WHERE id = $1',
-        [user.id]
-      );
-      return res.status(401).json({ error: 'Identifiants invalides' });
-    }
+    // Au lieu de bcrypt.compare, vous faites une comparaison directe
+const validPass = (motDePasse === user.mot_de_passe);  // ← comparaison directe
+if (!validPass) {
+  await pool.query(
+    'UPDATE utilisateurs SET tentatives_connexion = tentatives_connexion + 1 WHERE id = $1',
+    [user.id]
+  );
+  return res.status(401).json({ error: 'Identifiants invalides' });
+}
 
     // Check tuteur status
     if (user.role === 'tuteur') {

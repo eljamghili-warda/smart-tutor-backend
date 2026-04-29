@@ -22,7 +22,7 @@ const creerSalle = async (req, res) => {
     await client.query(`INSERT INTO tableaux_blancs (salle_id) VALUES ($1)`, [salle.id]);
 
     await client.query('COMMIT');
-    res.status(201).json({ message: 'Salle créée', salle });
+    res.status(201).json({ message: 'Salle créée', ...salle });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error(err);

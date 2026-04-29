@@ -21,27 +21,33 @@ const setupSocket = (io) => {
 
     // ─── REJOINDRE UNE SALLE ──────────────────────────────
     socket.on('join:salle', async ({ salleId }) => {
-      const membership = await pool.query(
-        'SELECT role FROM participations WHERE utilisateur_id=$1 AND salle_id=$2',
-        [socket.user.id, salleId]
-      );
-      if (!membership.rows.length) {
-        socket.emit('error', { message: 'Non autorisé dans cette salle' });
-        return;
-      }
-      socket.join(`salle:${salleId}`);
-      socket.salleId = salleId;
-      socket.roleSalle = membership.rows[0].role;
+  if (!salleId) {
+    socket.emit('error', { message: 'salleId manquant' });
+    return;
+  }
 
-      // Notifier les membres
-      io.to(`salle:${salleId}`).emit('salle:user-joined', {
-        userId: socket.user.id,
-        prenom: socket.user.prenom,
-        nom: socket.user.nom,
-      });
+  const membership = await pool.query(
+    'SELECT role FROM participations WHERE utilisateur_id=$1 AND salle_id=$2',
+    [socket.user.id, salleId]
+  );
 
-      socket.emit('salle:joined', { salleId, role: socket.roleSalle });
-    });
+  if (!membership.rows.length) {
+    socket.emit('error', { message: 'Non autorisé dans cette salle' });
+    return;
+  }
+
+  socket.join(`salle:${salleId}`);
+  socket.salleId = salleId;
+  socket.roleSalle = membership.rows[0].role;
+
+  io.to(`salle:${salleId}`).emit('salle:user-joined', {
+    userId: socket.user.id,
+    prenom: socket.user.prenom,
+    nom: socket.user.nom,
+  });
+
+  socket.emit('salle:joined', { salleId, role: socket.roleSalle });
+});
 
     // ─── QUITTER UNE SALLE ────────────────────────────────
     socket.on('leave:salle', ({ salleId }) => {
