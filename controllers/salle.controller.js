@@ -213,9 +213,8 @@ const demanderInvitation = async (req, res) => {
     const { id } = req.params;
     const salle = await pool.query('SELECT * FROM salles WHERE id=$1', [id]);
     if (!salle.rows.length) return res.status(404).json({ error: 'Salle introuvable' });
-    if (salle.rows[0].type !== 'PRIVEE') {
-      return res.status(400).json({ error: 'Cette salle est publique, utilisez rejoindre directement.' });
-    }
+    // Salle publique ou privée : l'étudiant envoie une demande à l'admin
+    // (pour les salles publiques, on ne rejoint plus directement, on demande aussi)
 
     // Vérifier si déjà membre
     const deja = await pool.query(

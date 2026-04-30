@@ -221,8 +221,30 @@ const setDisponibilite = async (req, res) => {
   }
 };
 
+
+// ─── CRON: vérifier et annuler automatiquement les séances non lancées ─────
+// Règle : si date_debut + duree est dépassée ET aucun appel lancé => ANNULEE
+const verifierSeancesExpirees = async () => {
+  try {
+    const result = await pool.query(`
+      UPDATE seances
+      SET statut = 'ANNULEE'
+      WHERE statut = 'PLANIFIEE'
+        AND (date_debut + (duree * interval '1 minute')) < NOW()
+        AND session_appel_id IS NULL
+      RETURNING id, titre, salle_id
+    `);
+    if (result.rows.length > 0) {
+      console.log(`🔄 Auto-annulation: ${result.rows.length} séance(s) annulée(s) (non lancées)`);
+    }
+  } catch (err) {
+    console.error('verifierSeancesExpirees error:', err);
+  }
+};
+
 module.exports = {
   getSeances, getEmploiDuTemps, createSeance,
   lancerSeance, terminerSeance, annulerSeance,
-  getDisponibilites, setDisponibilite
+  getDisponibilites, setDisponibilite,
+  verifierSeancesExpirees
 };

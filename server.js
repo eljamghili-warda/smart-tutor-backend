@@ -10,6 +10,7 @@ const fs = require('fs');
 const routes = require('./routes/index');
 const setupSocket = require('./socket/index');
 const { expireInvitations } = require('./controllers/invitation.controller');
+const { verifierSeancesExpirees } = require('./controllers/seance.controller');
 
 const app = express();
 const server = http.createServer(app);
@@ -60,6 +61,11 @@ setupSocket(io);
 
 // Expire invitations every hour
 setInterval(expireInvitations, 60 * 60 * 1000);
+
+// Vérifier séances non lancées toutes les 5 minutes
+// Règle: séance PLANIFIEE dont la fin est dépassée sans appel => ANNULEE
+setInterval(verifierSeancesExpirees, 5 * 60 * 1000);
+verifierSeancesExpirees(); // vérification au démarrage
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
