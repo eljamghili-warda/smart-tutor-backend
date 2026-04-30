@@ -39,7 +39,7 @@ const getEmploiDuTemps = async (req, res) => {
       WHERE s.salle_id IN (
         SELECT salle_id FROM participations WHERE utilisateur_id=$1
       )
-      AND s.statut IN ('PLANIFIEE','EN_COURS')
+      AND s.statut IN ('PLANIFIEE','EN_COURS','REALISEE','ANNULEE')
       AND ($2::timestamp IS NULL OR s.date_debut >= $2::timestamp)
       AND ($3::timestamp IS NULL OR s.date_debut <= $3::timestamp)
       ORDER BY s.date_debut

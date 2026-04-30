@@ -13,7 +13,6 @@ const getMesInvitations = async (req, res) => {
       JOIN utilisateurs exp ON i.expediteur_id = exp.id
       JOIN utilisateurs dest ON i.destinataire_id = dest.id
       WHERE (i.destinataire_id = $1 OR i.expediteur_id = $1)
-        AND i.statut = 'EN_ATTENTE'
       ORDER BY i.date_envoi DESC
     `, [req.user.id]);
     res.json(result.rows);
@@ -120,8 +119,15 @@ const accepterInvitation = async (req, res) => {
       await client.query(
         `UPDATE salles SET statut='ACTIVE_AVEC_TUTEUR' WHERE id=$1`, [invitation.salle_id]
       );
+    } else if (invitation.type_invitation === 'VERS_ETUDIANT') {
+      // L'admin accepte la demande d'un étudiant => ajouter l'étudiant (expediteur) à la salle
+      await client.query(
+        `INSERT INTO participations (utilisateur_id, salle_id, role) VALUES ($1, $2, 'MEMBRE')
+         ON CONFLICT (utilisateur_id, salle_id) DO NOTHING`,
+        [invitation.expediteur_id, invitation.salle_id]
+      );
     } else {
-      // Etudiant rejoint la salle
+      // Invitation directe: l'étudiant destinataire rejoint
       await client.query(
         `INSERT INTO participations (utilisateur_id, salle_id, role) VALUES ($1, $2, 'MEMBRE')
          ON CONFLICT (utilisateur_id, salle_id) DO NOTHING`,

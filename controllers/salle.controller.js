@@ -158,14 +158,20 @@ const rejoindreSalle = async (req, res) => {
 
     // Salle privée => refuser le rejoindre direct (utiliser invitation)
     if (salle.rows[0].type === 'PRIVEE' && req.user.role !== 'admin') {
-      // Vérifier si une invitation acceptée existe
+      // Vérifier si une invitation acceptée existe (dans les 2 sens)
+      // Cas 1: admin a invité l'étudiant (destinataire=étudiant)
+      // Cas 2: étudiant a demandé et admin a accepté (expediteur=étudiant, type=VERS_ETUDIANT)
       const invite = await pool.query(
         `SELECT id FROM invitations 
-         WHERE salle_id=$1 AND destinataire_id=$2 AND statut='ACCEPTEE'`,
+         WHERE salle_id=$1 AND statut='ACCEPTEE'
+         AND (
+           (destinataire_id=$2)
+           OR (expediteur_id=$2 AND type_invitation='VERS_ETUDIANT')
+         )`,
         [id, req.user.id]
       );
       if (!invite.rows.length) {
-        return res.status(403).json({ error: 'Cette salle est privée. Vous devez être invité.' });
+        return res.status(403).json({ error: 'Cette salle est privée. Votre demande na pas encore été acceptée.' });
       }
     }
 
