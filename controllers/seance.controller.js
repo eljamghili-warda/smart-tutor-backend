@@ -226,17 +226,30 @@ const setDisponibilite = async (req, res) => {
 // Règle : si date_debut + duree est dépassée ET aucun appel lancé => ANNULEE
 const verifierSeancesExpirees = async () => {
   try {
+    // Annuler automatiquement les séances dont l'heure de fin est dépassée
+    // ET aucun appel n'a été lancé (session_appel_id IS NULL)
     const result = await pool.query(`
       UPDATE seances
       SET statut = 'ANNULEE'
       WHERE statut = 'PLANIFIEE'
         AND (date_debut + (duree * interval '1 minute')) < NOW()
-        AND session_appel_id IS NULL
+        AND (session_appel_id IS NULL)
       RETURNING id, titre, salle_id
     `);
     if (result.rows.length > 0) {
-      console.log(`🔄 Auto-annulation: ${result.rows.length} séance(s) annulée(s) (non lancées)`);
+      console.log('🔄 Auto-annulation: ' + result.rows.length + ' séance(s) annulée(s) (aucun appel lancé)');
     }
+
+    // Marquer EN_COURS les séances dont l'heure est arrivée et un appel est actif
+    await pool.query(`
+      UPDATE seances s
+      SET statut = 'EN_COURS'
+      FROM sessions_appel sa
+      WHERE s.session_appel_id = sa.id
+        AND s.statut = 'PLANIFIEE'
+        AND sa.actif = TRUE
+        AND s.date_debut <= NOW()
+    `);
   } catch (err) {
     console.error('verifierSeancesExpirees error:', err);
   }

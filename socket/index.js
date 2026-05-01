@@ -4,12 +4,18 @@ const { v4: uuidv4 } = require('uuid');
 
 const setupSocket = (io) => {
   // Auth middleware for sockets
-  io.use((socket, next) => {
+  io.use(async (socket, next) => {
     const token = socket.handshake.auth.token;
     if (!token) return next(new Error('Token manquant'));
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      socket.user = decoded;
+      // Charger les infos complètes depuis la DB (prenom/nom pas toujours dans le JWT)
+      const result = await pool.query(
+        'SELECT id, prenom, nom, email, role FROM utilisateurs WHERE id=$1',
+        [decoded.id]
+      );
+      if (!result.rows.length) return next(new Error('Utilisateur introuvable'));
+      socket.user = result.rows[0];
       next();
     } catch {
       next(new Error('Token invalide'));
@@ -133,20 +139,81 @@ const setupSocket = (io) => {
            VALUES ($1,$2,$3,$4)`,
           [sessionId, salleId, seanceId || null, socket.user.id]
         );
+
+        // Fix 6: Si lié à une séance → passer la séance EN_COURS
+        if (seanceId) {
+          await pool.query(
+            `UPDATE seances SET statut='EN_COURS', session_appel_id=$1
+             WHERE id=$2 AND statut='PLANIFIEE'`,
+            [sessionId, seanceId]
+          );
+        }
+
         io.to(`salle:${salleId}`).emit('call:started', {
           sessionId,
+          salleId,
           initiateur: socket.user.id,
+          initiateurNom: `${socket.user.prenom} ${socket.user.nom}`,
+          initiateurRole: socket.roleSalle,
         });
       } catch (err) {
         console.error('Call start error:', err);
       }
     });
 
+    // Fix 2: seul l'initiateur de l'appel peut le terminer globalement
     socket.on('call:end', async ({ salleId, sessionId }) => {
+      const session = await pool.query(
+        'SELECT initiateur_id, seance_id FROM sessions_appel WHERE id=$1', [sessionId]
+      );
+      if (!session.rows.length) return;
+
+      const isInitiateur = session.rows[0].initiateur_id === socket.user.id;
+      const isTuteur = socket.roleSalle === 'CO_ADMIN' && socket.user.role === 'tuteur';
+      const isAdmin  = socket.roleSalle === 'ADMIN';
+
+      if (!isInitiateur && !isTuteur && !isAdmin) {
+        // Pas autorisé à terminer globalement → juste quitter localement
+        socket.emit('call:you-left');
+        return;
+      }
+
+      // Terminer l'appel pour tout le monde
       await pool.query(
         'UPDATE sessions_appel SET actif=FALSE, date_fin=NOW() WHERE id=$1', [sessionId]
       );
+
+      // Fix 6: Si lié à une séance → la marquer REALISEE
+      const seanceId = session.rows[0].seance_id;
+      if (seanceId) {
+        await pool.query(
+          `UPDATE seances SET statut='REALISEE' WHERE id=$1 AND statut='EN_COURS'`,
+          [seanceId]
+        );
+      }
+
       io.to(`salle:${salleId}`).emit('call:ended', { sessionId });
+    });
+
+    // Quitter l'appel localement (sans terminer pour tout le monde)
+    socket.on('call:leave', ({ sessionId }) => {
+      socket.leave(`call:${sessionId}`);
+      socket.emit('call:you-left');
+    });
+
+    // Membre accepte l'appel → notifier l'initiateur pour qu'il lui envoie un offer
+    socket.on('call:joined', ({ salleId, sessionId, userId }) => {
+      // Rejoindre la room de l'appel
+      socket.join(`call:${sessionId}`);
+      // Notifier tous les autres membres de l'appel qu'un nouveau pair a rejoint
+      socket.to(`call:${sessionId}`).emit('call:user-joined', { userId });
+      // Notifier aussi l'initiateur (qui est dans la salle) pour lui envoyer un offer
+      socket.to(`salle:${salleId}`).emit('call:user-joined', { userId });
+    });
+
+    // Membre refuse l'appel → log silencieux (optionnel: notifier l'initiateur)
+    socket.on('call:refused', ({ sessionId, userId }) => {
+      console.log(`User ${userId} refused call ${sessionId}`);
     });
 
     // WebRTC signaling

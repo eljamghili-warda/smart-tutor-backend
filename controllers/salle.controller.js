@@ -171,7 +171,7 @@ const rejoindreSalle = async (req, res) => {
         [id, req.user.id]
       );
       if (!invite.rows.length) {
-        return res.status(403).json({ error: 'Cette salle est privée. Votre demande na pas encore été acceptée.' });
+        return res.status(403).json({ error: 'Cette salle est privée. Votre demande n pas encore été acceptée.' });
       }
     }
 
@@ -263,10 +263,16 @@ const quitterSalle = async (req, res) => {
     );
     if (!participation.rows.length) return res.status(404).json({ error: 'Non membre de cette salle' });
 
-    // Admin exit → ferme la salle
+    // Admin exit → supprime définitivement la salle et toutes ses données
     if (participation.rows[0].role === 'ADMIN') {
-      await pool.query("UPDATE salles SET statut='FERMEE' WHERE id=$1", [id]);
-      return res.json({ message: 'Salle fermée (admin a quitté)', salleFermee: true });
+      await pool.query('DELETE FROM messages        WHERE salle_id=$1', [id]);
+      await pool.query('DELETE FROM invitations     WHERE salle_id=$1', [id]);
+      await pool.query('DELETE FROM seances         WHERE salle_id=$1', [id]);
+      await pool.query('DELETE FROM fichiers_partages WHERE salle_id=$1', [id]);
+      await pool.query('DELETE FROM tableaux_blancs WHERE salle_id=$1', [id]);
+      await pool.query('DELETE FROM participations  WHERE salle_id=$1', [id]);
+      await pool.query('DELETE FROM salles          WHERE id=$1',       [id]);
+      return res.json({ message: 'Salle supprimée définitivement', salleSuprimee: true });
     }
 
     // Tuteur exit → salle perd son tuteur
