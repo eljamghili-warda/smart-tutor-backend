@@ -16,7 +16,7 @@ router.get('/salles/mes-salles',         authenticate, salleCtrl.getMesSalles);
 router.post('/salles',                   authenticate, salleCtrl.createSalle);
 router.get('/salles/:id',                authenticate, salleCtrl.getSalle);
 router.post('/salles/:id/rejoindre',     authenticate, requireActiveTuteur, salleCtrl.rejoindreSalle);
-router.post('/salles/:id/demander',      authenticate, salleCtrl.demanderInvitation); // ← NEW: demande pour salle privée
+router.post('/salles/:id/demander',      authenticate, salleCtrl.demanderInvitation);
 router.delete('/salles/:id/quitter',     authenticate, salleCtrl.quitterSalle);
 router.get('/salles/:id/participants',   authenticate, salleCtrl.getParticipants);
 router.get('/salles/:id/messages',       authenticate, salleCtrl.getMessages);
@@ -31,12 +31,11 @@ router.put('/invitations/:id/accepter',  authenticate, invitCtrl.accepterInvitat
 router.put('/invitations/:id/refuser',   authenticate, invitCtrl.refuserInvitation);
 
 // ─── Séances ──────────────────────────────────────────────────────
+// NOTE: lancer/terminer sont supprimés — tout passe par le socket (call:start / call:end)
 const seanceCtrl = require('../controllers/seance.controller');
 router.get('/seances',                   authenticate, seanceCtrl.getSeances);
 router.get('/seances/emploi-du-temps',   authenticate, seanceCtrl.getEmploiDuTemps);
 router.post('/seances',                  authenticate, requireRole('tuteur'), seanceCtrl.createSeance);
-router.post('/seances/:id/lancer',       authenticate, requireRole('tuteur'), seanceCtrl.lancerSeance);
-router.post('/seances/:id/terminer',     authenticate, requireRole('tuteur'), seanceCtrl.terminerSeance);
 router.put('/seances/:id/annuler',       authenticate, requireRole('tuteur'), seanceCtrl.annulerSeance);
 router.get('/seances/disponibilites',    authenticate, seanceCtrl.getDisponibilites);
 router.post('/seances/disponibilites',   authenticate, requireRole('tuteur'), seanceCtrl.setDisponibilite);
@@ -53,14 +52,14 @@ router.get('/evaluations/tuteur/:id',    authenticate, evalCtrl.getEvaluationsTu
 
 // ─── Admin ────────────────────────────────────────────────────────
 const adminCtrl = require('../controllers/admin.controller');
-router.get('/admin/stats',                   authenticate, requireRole('admin'), adminCtrl.getStats);
-router.get('/admin/utilisateurs',            authenticate, requireRole('admin'), adminCtrl.getUtilisateurs);
-router.put('/admin/utilisateurs/:id/bloquer',authenticate, requireRole('admin'), adminCtrl.bloquerUtilisateur);
-router.delete('/admin/utilisateurs/:id',     authenticate, requireRole('admin'), adminCtrl.supprimerUtilisateur);
-router.get('/admin/tuteurs/pending',         authenticate, requireRole('admin'), adminCtrl.getTuteursPending);
-router.put('/admin/tuteurs/:id/valider',     authenticate, requireRole('admin'), adminCtrl.validerTuteur);
-router.get('/admin/salles',                  authenticate, requireRole('admin'), adminCtrl.getSallesAdmin);
-router.put('/admin/salles/:id/fermer',       authenticate, requireRole('admin'), adminCtrl.fermerSalle);
-router.get('/admin/seances',                 authenticate, requireRole('admin'), adminCtrl.getSeancesAdmin);
+router.get('/admin/stats',                    authenticate, requireRole('admin'), adminCtrl.getStats);
+router.get('/admin/utilisateurs',             authenticate, requireRole('admin'), adminCtrl.getUtilisateurs);
+router.put('/admin/utilisateurs/:id/bloquer', authenticate, requireRole('admin'), adminCtrl.bloquerUtilisateur);
+router.delete('/admin/utilisateurs/:id',      authenticate, requireRole('admin'), adminCtrl.supprimerUtilisateur);
+router.get('/admin/tuteurs/pending',          authenticate, requireRole('admin'), adminCtrl.getTuteursPending);
+router.put('/admin/tuteurs/:id/valider',      authenticate, requireRole('admin'), adminCtrl.validerTuteur);
+router.get('/admin/salles',                   authenticate, requireRole('admin'), adminCtrl.getSallesAdmin);
+router.put('/admin/salles/:id/fermer',        authenticate, requireRole('admin'), adminCtrl.fermerSalle);
+router.get('/admin/seances',                  authenticate, requireRole('admin'), adminCtrl.getSeancesAdmin);
 
 module.exports = router;
