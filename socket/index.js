@@ -151,9 +151,31 @@ const setupSocket = (io) => {
     });
 
     // ─── APPEL AUDIO ──────────────────────────────────────
-    // NOUVEAU: Détection automatique de séance dans fenêtre ±5min
-    // Si pas de séance → appel libre (seanceId = null), ça marche quand même
+    // Seul le tuteur (CO_ADMIN) ou l'admin-sans-tuteur peut démarrer un appel
     socket.on('call:start', async ({ salleId, seanceId }) => {
+      // Vérifier le rôle dans la salle
+      const isTuteurRole = socket.roleSalle === 'CO_ADMIN' && socket.user.role === 'tuteur'
+      const isAdminRole  = socket.roleSalle === 'ADMIN'
+
+      if (!isTuteurRole && !isAdminRole) {
+        socket.emit('error', { message: 'Seul le tuteur ou l\'administrateur peut démarrer un appel.' })
+        return
+      }
+
+      // Si admin → vérifier qu'il n'y a pas de tuteur dans la salle
+      if (isAdminRole && !isTuteurRole) {
+        const hasTuteur = await pool.query(
+          `SELECT 1 FROM participations p
+           JOIN utilisateurs u ON p.utilisateur_id = u.id
+           WHERE p.salle_id = $1 AND p.role = 'CO_ADMIN' AND u.role = 'tuteur'
+           LIMIT 1`,
+          [salleId]
+        )
+        if (hasTuteur.rows.length > 0) {
+          socket.emit('error', { message: 'Un tuteur est présent dans la salle. Seul lui peut démarrer l\'appel.' })
+          return
+        }
+      }
       const sessionId = uuidv4();
       try {
         // Si seanceId non fourni → chercher automatiquement une séance ±5min
@@ -181,8 +203,56 @@ const setupSocket = (io) => {
           [sessionId, salleId, resolvedSeanceId, socket.user.id]
         );
 
-        // Si une séance est liée → la passer EN_COURS
+        // Si une séance est liée → vérifier la fenêtre de démarrage et passer EN_COURS
         if (resolvedSeanceId) {
+          const seanceInfo = await pool.query(
+            `SELECT date_debut, duree FROM seances WHERE id=$1`,
+            [resolvedSeanceId]
+          );
+          if (seanceInfo.rows.length > 0) {
+            const { date_debut, duree } = seanceInfo.rows[0];
+            const dateDebut   = new Date(date_debut);
+            const dateFin     = new Date(dateDebut.getTime() + duree * 60 * 1000);
+            const now         = new Date();
+            const fenetreMs   = 5 * 60 * 1000; // 5 minutes en ms
+
+            const debutValide = now >= new Date(dateDebut.getTime() - fenetreMs);
+            const finValide   = now <= new Date(dateFin.getTime() + fenetreMs);
+
+            if (!debutValide || !finValide) {
+              // L'appel est lancé hors de la fenêtre valide → séance ANNULEE
+              await pool.query(
+                `UPDATE seances SET statut='ANNULEE' WHERE id=$1 AND statut='PLANIFIEE'`,
+                [resolvedSeanceId]
+              );
+              await pool.query(
+                `UPDATE sessions_appel SET actif=FALSE, date_fin=NOW(), duree_reelle_minutes=0
+                 WHERE id=$1`,
+                [sessionId]
+              );
+              io.to(`salle:${salleId}`).emit('seance:updated', {
+                seanceId: resolvedSeanceId,
+                statut: 'ANNULEE',
+              });
+              const minutesAvant = Math.round((dateDebut - now) / 60000);
+              const minutesApres = Math.round((now - dateFin) / 60000);
+              const raison = !debutValide
+                ? `L'appel a été lancé trop tard (plus de 5 min après la fin de la séance)`
+                : `L'appel a été lancé trop tôt (${minutesAvant} min avant le début)`;
+              socket.emit('error', { message: `Séance annulée : ${raison}.` });
+              io.to(`salle:${salleId}`).emit('call:started', {
+                sessionId,
+                salleId,
+                initiateur: socket.user.id,
+                initiateurNom: `${socket.user.prenom} ${socket.user.nom}`,
+                initiateurRole: socket.roleSalle,
+                seanceAnnulee: true,
+              });
+              console.log(`⚠️ Séance ${resolvedSeanceId} ANNULEE — appel hors fenêtre`);
+              return;
+            }
+          }
+
           await pool.query(
             `UPDATE seances SET statut='EN_COURS', session_appel_id=$1
              WHERE id=$2 AND statut='PLANIFIEE'`,
@@ -226,22 +296,61 @@ const setupSocket = (io) => {
         return;
       }
 
-      await pool.query(
-        'UPDATE sessions_appel SET actif=FALSE, date_fin=NOW() WHERE id=$1', [sessionId]
+      // Calculer la durée réelle de l'appel et clôturer la session
+      const closeResult = await pool.query(
+        `UPDATE sessions_appel
+         SET actif=FALSE,
+             date_fin=NOW(),
+             duree_reelle_minutes = ROUND(EXTRACT(EPOCH FROM (NOW() - date_debut)) / 60)
+         WHERE id=$1
+         RETURNING date_debut, duree_reelle_minutes`,
+        [sessionId]
       );
 
-      // NOUVEAU: Si lié à une séance → la marquer REALISEE
+      // Décider REALISEE ou ANNULEE selon les règles métier de la séance liée
       const seanceId = session.rows[0].seance_id;
       if (seanceId) {
-        await pool.query(
-          `UPDATE seances SET statut='REALISEE' WHERE id=$1 AND statut='EN_COURS'`,
+        // Récupérer les infos de la séance pour appliquer la règle des 5 minutes
+        const seanceInfo = await pool.query(
+          `SELECT date_debut, duree FROM seances WHERE id=$1`,
           [seanceId]
         );
-        io.to(`salle:${salleId}`).emit('seance:updated', {
-          seanceId,
-          statut: 'REALISEE',
-        });
-        console.log(`✅ Séance ${seanceId} → REALISEE`);
+
+        let statutFinal = 'REALISEE'; // par défaut
+
+        if (seanceInfo.rows.length > 0) {
+          const { date_debut, duree } = seanceInfo.rows[0];
+          const dateDebutSeance = new Date(date_debut);
+          const dateFinSeance   = new Date(dateDebutSeance.getTime() + duree * 60 * 1000);
+          const now             = new Date();
+          const fenetreMs       = 5 * 60 * 1000; // 5 minutes en ms
+
+          // Règle : si l'appel se termine PLUS DE 5 MIN AVANT la fin prévue → ANNULEE
+          // (l'appel a été trop court, la séance n'a pas pu être réalisée correctement)
+          const termineTropTot = now < new Date(dateFinSeance.getTime() - fenetreMs);
+
+          if (termineTropTot) {
+            statutFinal = 'ANNULEE';
+            const minutesManquantes = Math.round((dateFinSeance - now) / 60000);
+            console.log(`⚠️ Séance ${seanceId} ANNULEE — appel terminé ${minutesManquantes} min trop tôt`);
+          } else {
+            console.log(`✅ Séance ${seanceId} → REALISEE (appel terminé dans la fenêtre valide)`);
+          }
+        }
+
+        const updatedSeance = await pool.query(
+          `UPDATE seances SET statut=$1
+           WHERE id=$2 AND statut IN ('EN_COURS', 'PLANIFIEE')
+           RETURNING id`,
+          [statutFinal, seanceId]
+        );
+
+        if (updatedSeance.rows.length > 0) {
+          io.to(`salle:${salleId}`).emit('seance:updated', {
+            seanceId,
+            statut: statutFinal,
+          });
+        }
       }
 
       io.to(`salle:${salleId}`).emit('call:ended', { sessionId });
@@ -257,11 +366,22 @@ const setupSocket = (io) => {
       console.log(`🚪 User ${socket.user.id} quitté appel ${sessionId} (appel continue)`);
     });
 
-    // Membre accepte l'appel → notifier les autres pour WebRTC
-    socket.on('call:joined', ({ salleId, sessionId, userId }) => {
+    // Membre accepte l'appel → rejoindre la room + notifier l'initiateur via WebRTC
+    socket.on('call:joined', async ({ salleId, sessionId, userId }) => {
       socket.join(`call:${sessionId}`);
-      socket.to(`call:${sessionId}`).emit('call:user-joined', { userId });
-      socket.to(`salle:${salleId}`).emit('call:user-joined', { userId });
+      // Notifier TOUTE la salle que ce user a rejoint l'appel (pour le panneau visuel)
+      io.to(`salle:${salleId}`).emit('call:user-joined', { userId: socket.user.id });
+      // Enregistrer dans participations_appel
+      try {
+        await pool.query(
+          `INSERT INTO participations_appel (session_id, utilisateur_id, a_rejoint, date_rejoint)
+           VALUES ($1, $2, TRUE, NOW())
+           ON CONFLICT (session_id, utilisateur_id)
+           DO UPDATE SET a_rejoint=TRUE, date_rejoint=NOW()`,
+          [sessionId, socket.user.id]
+        );
+      } catch(err) { console.error('participations_appel insert error:', err); }
+      console.log(`✅ User ${socket.user.id} a rejoint l'appel ${sessionId}`);
     });
 
     socket.on('call:refused', ({ sessionId, userId }) => {
@@ -287,15 +407,35 @@ const setupSocket = (io) => {
       });
     });
 
-    socket.on('call:join', ({ salleId, sessionId }) => {
+    // Initiateur rejoint sa propre room d'appel + s'enregistre dans participations_appel
+    socket.on('call:join', async ({ salleId, sessionId }) => {
       socket.join(`call:${sessionId}`);
-      socket.to(`call:${sessionId}`).emit('call:user-joined', { userId: socket.user.id });
+      // Notifier la salle que l'initiateur est dans l'appel (pour le panneau visuel)
+      io.to(`salle:${salleId}`).emit('call:user-joined', { userId: socket.user.id });
+      try {
+        await pool.query(
+          `INSERT INTO participations_appel (session_id, utilisateur_id, a_rejoint, date_rejoint)
+           VALUES ($1, $2, TRUE, NOW())
+           ON CONFLICT (session_id, utilisateur_id)
+           DO UPDATE SET a_rejoint=TRUE, date_rejoint=NOW()`,
+          [sessionId, socket.user.id]
+        );
+      } catch(err) { console.error('participations_appel insert error (initiateur):', err); }
     });
 
-    socket.on('call:mute', ({ sessionId, muted }) => {
-      socket.to(`call:${sessionId}`).emit('call:user-muted', {
+    socket.on('call:mute', async ({ sessionId, muted }) => {
+      // Diffuser le changement de micro à tous les participants de l'appel dans la salle
+      io.to(`call:${sessionId}`).emit('call:user-muted', {
         userId: socket.user.id, muted,
       });
+      // Persister dans participations_appel
+      try {
+        await pool.query(
+          `UPDATE participations_appel SET micro_coupe=$1
+           WHERE session_id=$2 AND utilisateur_id=$3`,
+          [muted, sessionId, socket.user.id]
+        );
+      } catch(err) { console.error('participations_appel mute error:', err); }
     });
 
     // ─── USER ROOM ────────────────────────────────────────

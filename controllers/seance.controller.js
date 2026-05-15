@@ -128,49 +128,68 @@ const setDisponibilite = async (req, res) => {
   }
 };
 
-// ─── CRON : annuler automatiquement les séances expirées sans appel ────────────
-//
-// Règles :
-//   1. PLANIFIEE dont la fin (date_debut + duree) est dépassée ET pas d'appel
-//      → ANNULEE  (personne n'a lancé d'appel pendant le créneau)
-//
-//   2. EN_COURS dont la session_appel liée est terminée (actif=FALSE)
-//      et dont la fin est dépassée → REALISEE  (sécurité : normalement
-//      géré par call:end, mais au cas où le serveur redémarre)
-//
+
+// ─── Règles métier des 5 minutes ─────────────────────────────────────────────
+// • L'appel peut démarrer entre  [date_debut - 5min]  et  [date_fin + 5min]
+//   → hors fenêtre au démarrage  : séance ANNULEE
+// • L'appel peut se terminer jusqu'à 5 min avant date_fin
+//   → terminé plus de 5 min trop tôt : séance ANNULEE
+//   → terminé dans la fenêtre        : séance REALISEE
+const FENETRE_MINUTES = 5;
+
 const verifierSeancesExpirees = async () => {
   try {
-    // 1. Séances PLANIFIEES sans appel dont la fenêtre est passée → ANNULEE
-    const annulees = await pool.query(`
-      UPDATE seances
-      SET statut = 'ANNULEE'
-      WHERE statut = 'PLANIFIEE'
-        AND session_appel_id IS NULL
-        AND (date_debut + (duree * interval '1 minute')) < NOW()
-      RETURNING id, titre, salle_id
-    `);
+    // ── 1. Séances PLANIFIEES dont la fenêtre + 5 min est dépassée sans appel → ANNULEE
+    const annulees = await pool.query(
+      `UPDATE seances
+       SET statut = 'ANNULEE'
+       WHERE statut = 'PLANIFIEE'
+         AND session_appel_id IS NULL
+         AND (date_debut + (duree * interval '1 minute') + interval '5 minutes') < NOW()
+       RETURNING id, titre, salle_id`
+    );
     if (annulees.rows.length > 0) {
       console.log(`🔄 Auto-annulation : ${annulees.rows.length} séance(s) sans appel → ANNULEE`);
     }
 
-    // 2. Séances EN_COURS dont l'appel est terminé ET la fin est dépassée → REALISEE
-    const realisees = await pool.query(`
-      UPDATE seances s
-      SET statut = 'REALISEE'
-      FROM sessions_appel sa
-      WHERE s.session_appel_id = sa.id
-        AND s.statut = 'EN_COURS'
-        AND sa.actif = FALSE
-        AND (s.date_debut + (s.duree * interval '1 minute')) < NOW()
-      RETURNING s.id, s.titre
-    `);
-    if (realisees.rows.length > 0) {
-      console.log(`✅ Auto-réalisation : ${realisees.rows.length} séance(s) → REALISEE`);
+    // ── 2. Séances EN_COURS/PLANIFIEE dont l'appel est terminé → règle des 5 min ──
+    // Récupérer toutes les séances dont la session est clôturée
+    const sesTerminees = await pool.query(
+      `SELECT s.id AS seance_id, s.date_debut, s.duree, sa.date_fin
+       FROM seances s
+       JOIN sessions_appel sa ON s.session_appel_id = sa.id
+       WHERE s.statut IN ('EN_COURS', 'PLANIFIEE')
+         AND sa.actif = FALSE
+         AND sa.date_fin IS NOT NULL`
+    );
+
+    for (const row of sesTerminees.rows) {
+      const dateFinPrevue  = new Date(new Date(row.date_debut).getTime() + row.duree * 60 * 1000);
+      const dateFinAppel   = new Date(row.date_fin);
+      const fenetreMs      = FENETRE_MINUTES * 60 * 1000;
+
+      // Si l'appel s'est terminé plus de 5 min AVANT la fin prévue → ANNULEE
+      const termineTropTot = dateFinAppel < new Date(dateFinPrevue.getTime() - fenetreMs);
+      const statutFinal    = termineTropTot ? 'ANNULEE' : 'REALISEE';
+
+      await pool.query(
+        `UPDATE seances SET statut = $1 WHERE id = $2 AND statut IN ('EN_COURS', 'PLANIFIEE')`,
+        [statutFinal, row.seance_id]
+      );
+
+      if (termineTropTot) {
+        const minManquantes = Math.round((dateFinPrevue - dateFinAppel) / 60000);
+        console.log(`⚠️ Séance ${row.seance_id} → ANNULEE (appel terminé ${minManquantes} min trop tôt)`);
+      } else {
+        console.log(`✅ Séance ${row.seance_id} → REALISEE (cron de sécurité)`);
+      }
     }
+
   } catch (err) {
     console.error('verifierSeancesExpirees error:', err);
   }
 };
+
 
 module.exports = {
   getSeances,
