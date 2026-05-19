@@ -13,12 +13,14 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@chargily/chargily-pay": "^2.1.0",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "express-fileupload": "^1.5.2",
     "jsonwebtoken": "^9.0.3",
+    "nodemailer": "^8.0.7",
     "pg": "^8.20.0",
     "socket.io": "^4.8.3",
     "uuid": "^14.0.0"

@@ -50,6 +50,21 @@ const evalCtrl = require('../controllers/evaluation.controller');
 router.post('/evaluations',              authenticate, requireRole('etudiant'), evalCtrl.createEvaluation);
 router.get('/evaluations/tuteur/:id',    authenticate, evalCtrl.getEvaluationsTuteur);
 
+// ─── Tarifs tuteur ────────────────────────────────────────────────
+const tarifCtrl = require('../controllers/tarif.controller');
+router.get('/tarifs/mes-tarifs',        authenticate, requireRole('tuteur'), tarifCtrl.getMesTarifs);
+router.get('/tarifs/:tuteurId',         authenticate, tarifCtrl.getTarifsTuteur);
+router.post('/tarifs',                  authenticate, requireRole('tuteur'), tarifCtrl.upsertTarif);
+router.delete('/tarifs/:id',            authenticate, requireRole('tuteur'), tarifCtrl.deleteTarif);
+
+// ─── Paiements ────────────────────────────────────────────────────
+const paiementCtrl = require('../controllers/paiement.controller');
+router.get('/paiements/mes-paiements',        authenticate, paiementCtrl.getMesPaiements);
+router.get('/paiements/mes-revenus',          authenticate, requireRole('tuteur'), paiementCtrl.getMesRevenus);
+router.get('/paiements/seance/:seanceId',     authenticate, paiementCtrl.getPaiementSeance);
+router.post('/paiements',                     authenticate, paiementCtrl.payerSeance);
+router.post('/paiements/:id/rembourser',      authenticate, paiementCtrl.rembourserPaiement);
+
 // ─── Admin ────────────────────────────────────────────────────────
 const adminCtrl = require('../controllers/admin.controller');
 router.get('/admin/stats',                    authenticate, requireRole('admin'), adminCtrl.getStats);
@@ -61,5 +76,8 @@ router.put('/admin/tuteurs/:id/valider',      authenticate, requireRole('admin')
 router.get('/admin/salles',                   authenticate, requireRole('admin'), adminCtrl.getSallesAdmin);
 router.put('/admin/salles/:id/fermer',        authenticate, requireRole('admin'), adminCtrl.fermerSalle);
 router.get('/admin/seances',                  authenticate, requireRole('admin'), adminCtrl.getSeancesAdmin);
+// Admin financier
+router.get('/admin/revenus',                  authenticate, requireRole('admin'), paiementCtrl.getAdminRevenus);
+router.get('/admin/paiements',                authenticate, requireRole('admin'), paiementCtrl.getAllPaiements);
 
 module.exports = router;

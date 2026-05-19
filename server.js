@@ -13,6 +13,7 @@ const { expireInvitations } = require('./controllers/invitation.controller');
 const { verifierSeancesExpirees } = require('./controllers/seance.controller');
 
 const app = express();
+const bodyParser = require('body-parser');
 const server = http.createServer(app);
 
 // Socket.io
@@ -66,6 +67,11 @@ setInterval(expireInvitations, 60 * 60 * 1000);
 // Règle: séance PLANIFIEE dont la fin est dépassée sans appel => ANNULEE
 setInterval(verifierSeancesExpirees, 5 * 60 * 1000);
 verifierSeancesExpirees(); // vérification au démarrage
+// Middleware qui capture rawBody pour le webhook Chargily uniquement
+app.use('/api/paiements/webhook', bodyParser.json({
+  verify: (req, res, buf) => { req.rawBody = buf; }
+}));
+app.use(express.json());
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {

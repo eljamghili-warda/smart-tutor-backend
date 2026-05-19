@@ -438,6 +438,56 @@ const setupSocket = (io) => {
       } catch(err) { console.error('participations_appel mute error:', err); }
     });
 
+    // ─── PARTAGE D'ÉCRAN ──────────────────────────────────
+    // Seul le tuteur peut démarrer un partage d'écran
+
+    socket.on('screen:start', ({ salleId }) => {
+      // Vérifier que c'est bien le tuteur
+      const isTuteur = socket.roleSalle === 'CO_ADMIN' && socket.user.role === 'tuteur'
+      const isAdmin  = socket.roleSalle === 'ADMIN'
+      if (!isTuteur && !isAdmin) {
+        socket.emit('error', { message: 'Seul le tuteur peut partager son écran.' })
+        return
+      }
+      // Notifier toute la salle qu'un partage commence
+      socket.to(`salle:${salleId}`).emit('screen:started', {
+        sharerId: socket.user.id,
+        sharerNom: `${socket.user.prenom} ${socket.user.nom}`,
+      })
+      socket.screenSalleId = salleId
+      console.log(`🖥️ Partage d'écran démarré par ${socket.user.id} dans salle ${salleId}`)
+    })
+
+    socket.on('screen:stop', ({ salleId }) => {
+      socket.to(`salle:${salleId}`).emit('screen:stopped', {
+        sharerId: socket.user.id,
+      })
+      socket.screenSalleId = null
+      console.log(`🖥️ Partage d'écran arrêté par ${socket.user.id}`)
+    })
+
+    // Signaling WebRTC pour le partage d'écran (offre du tuteur → chaque étudiant)
+    socket.on('screen:offer', ({ targetUserId, offer }) => {
+      io.to(`user:${targetUserId}`).emit('screen:offer', {
+        fromUserId: socket.user.id,
+        offer,
+      })
+    })
+
+    socket.on('screen:answer', ({ targetUserId, answer }) => {
+      io.to(`user:${targetUserId}`).emit('screen:answer', {
+        fromUserId: socket.user.id,
+        answer,
+      })
+    })
+
+    socket.on('screen:ice', ({ targetUserId, candidate }) => {
+      io.to(`user:${targetUserId}`).emit('screen:ice', {
+        fromUserId: socket.user.id,
+        candidate,
+      })
+    })
+
     // ─── USER ROOM ────────────────────────────────────────
     socket.on('register', () => {
       socket.join(`user:${socket.user.id}`);
