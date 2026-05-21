@@ -323,6 +323,72 @@ ALTER TABLE sessions_appel
 --   ✅ statut_paiement        (ta migration paiement ALTER TABLE seances)
 --   ✅ montant_total          (ta migration paiement ALTER TABLE seances)
 --   ✅ indexes paiements      (ta migration paiement)
+-- ══════════════════════════════════════════════
+-- MIGRATION FINALE SmartTutor (exécuter UNE fois)
+-- ══════════════════════════════════════════════
+
+-- Nouveaux statuts séance (si pas encore fait)
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_enum WHERE enumlabel = 'EN_ATTENTE_PAIEMENT' AND enumtypid = 'statut_seance'::regtype) THEN
+    ALTER TYPE statut_seance ADD VALUE 'EN_ATTENTE_PAIEMENT';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_enum WHERE enumlabel = 'CONFIRMEE' AND enumtypid = 'statut_seance'::regtype) THEN
+    ALTER TYPE statut_seance ADD VALUE 'CONFIRMEE';
+  END IF;
+END $$;
+
+-- Colonnes manquantes sur seances
+ALTER TABLE seances
+  ADD COLUMN IF NOT EXISTS montant_total    DECIMAL(10,2) DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS statut_paiement  VARCHAR(20)   DEFAULT 'EN_ATTENTE'
+    CHECK (statut_paiement IN ('EN_ATTENTE','PAYE','REMBOURSE','GRATUIT')),
+  ADD COLUMN IF NOT EXISTS created_at       TIMESTAMP DEFAULT NOW();
+
+-- Colonne durée réelle sur sessions_appel
+ALTER TABLE sessions_appel
+  ADD COLUMN IF NOT EXISTS duree_reelle_minutes INT DEFAULT 0;
+
+-- Table tarifs tuteur
+CREATE TABLE IF NOT EXISTS tuteur_tarifs (
+  id            BIGSERIAL PRIMARY KEY,
+  tuteur_id     BIGINT NOT NULL REFERENCES utilisateurs(id) ON DELETE CASCADE,
+  matiere       VARCHAR(150) NOT NULL,
+  tarif_heure   DECIMAL(10,2) NOT NULL CHECK (tarif_heure > 0),
+  date_creation TIMESTAMP DEFAULT NOW(),
+  UNIQUE(tuteur_id, matiere)
+);
+CREATE INDEX IF NOT EXISTS idx_tarifs_tuteur ON tuteur_tarifs(tuteur_id);
+
+-- Table paiements
+CREATE TABLE IF NOT EXISTS paiements (
+  id                    BIGSERIAL PRIMARY KEY,
+  seance_id             BIGINT REFERENCES seances(id) ON DELETE CASCADE,
+  payeur_id             BIGINT REFERENCES utilisateurs(id) ON DELETE SET NULL,
+  tuteur_id             BIGINT REFERENCES utilisateurs(id) ON DELETE SET NULL,
+  montant_total         DECIMAL(10,2) NOT NULL,
+  gain_tuteur           DECIMAL(10,2) NOT NULL,
+  commission_plateforme DECIMAL(10,2) NOT NULL,
+  methode               VARCHAR(50)   NOT NULL CHECK (methode IN ('CIH','ATTIJARIWAFA','PAYPAL')),
+  statut                VARCHAR(20)   DEFAULT 'COMPLETE' CHECK (statut IN ('COMPLETE','REMBOURSE')),
+  reference             VARCHAR(100)  UNIQUE,
+  donnees_carte         JSONB,
+  date_paiement         TIMESTAMP DEFAULT NOW(),
+  date_remboursement    TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_paiements_seance ON paiements(seance_id);
+CREATE INDEX IF NOT EXISTS idx_paiements_payeur ON paiements(payeur_id);
+CREATE INDEX IF NOT EXISTS idx_paiements_tuteur ON paiements(tuteur_id);
+
+-- Table config plateforme
+CREATE TABLE IF NOT EXISTS config_plateforme (
+  cle    VARCHAR(100) PRIMARY KEY,
+  valeur VARCHAR(255) NOT NULL
+);
+INSERT INTO config_plateforme (cle, valeur) VALUES
+  ('commission_taux', '0.15'),
+  ('commission_min',  '10')
+ON CONFLICT (cle) DO NOTHING;
 
 -- Admin account initial
 INSERT INTO utilisateurs (prenom, nom, email, mot_de_passe, role)
