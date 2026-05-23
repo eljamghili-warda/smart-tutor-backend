@@ -123,7 +123,8 @@ const getMe = async (req, res) => {
     const result = await pool.query(
       `SELECT u.id, u.prenom, u.nom, u.email, u.photo_profil, u.role, u.date_inscription,
               e.niveau_etude, e.filiere, e.etablissement,
-              t.specialites, t.biographie, t.note_moyenne, t.statut as statut_tuteur
+              t.specialites, t.biographie, t.note_moyenne, t.statut as statut_tuteur,
+              t.rib, t.nom_banque
        FROM utilisateurs u
        LEFT JOIN etudiants e ON u.id = e.utilisateur_id
        LEFT JOIN tuteurs t ON u.id = t.utilisateur_id
@@ -140,7 +141,7 @@ const updateProfile = async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const { prenom, nom, photoProfil, niveauEtude, filiere, etablissement, specialites, biographie } = req.body;
+    const { prenom, nom, photoProfil, niveauEtude, filiere, etablissement, specialites, biographie, rib, nomBanque } = req.body;
 
     await client.query(
       'UPDATE utilisateurs SET prenom=$1, nom=$2, photo_profil=$3 WHERE id=$4',
@@ -154,8 +155,8 @@ const updateProfile = async (req, res) => {
       );
     } else if (req.user.role === 'tuteur') {
       await client.query(
-        'UPDATE tuteurs SET specialites=$1, biographie=$2 WHERE utilisateur_id=$3',
-        [specialites, biographie, req.user.id]
+        'UPDATE tuteurs SET specialites=$1, biographie=$2, rib=$3, nom_banque=$4 WHERE utilisateur_id=$5',
+        [specialites, biographie, rib || null, nomBanque || null, req.user.id]
       );
     }
 

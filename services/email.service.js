@@ -175,6 +175,44 @@ const sendConfirmationRemboursement = async ({ to, nom, seance, paiement }) => {
   });
 };
 
+// ── EMAIL 4 (bis) : Notification admin plateforme — paiement reçu ────────────
+const sendNotificationAdminPlateforme = async ({ to, seance, salle, tuteur, payeur, paiement }) => {
+  const transporter = createTransporter();
+  const html = wrapTemplate(`
+    <div class="icon">🛡️</div>
+    <div class="title">Nouveau paiement reçu</div>
+    <div class="subtitle">Un paiement vient d'être effectué sur la plateforme SmartTutor.</div>
+
+    <div class="box">
+      <div class="row"><span class="label">Référence</span><span class="value" style="font-family:monospace">${paiement.reference}</span></div>
+      <div class="row"><span class="label">Séance</span><span class="value">${seance.titre}</span></div>
+      <div class="row"><span class="label">Salle</span><span class="value">${salle.nom}</span></div>
+      <div class="row"><span class="label">Tuteur</span><span class="value">${tuteur.prenom} ${tuteur.nom} &lt;${tuteur.email}&gt;</span></div>
+      <div class="row"><span class="label">Payeur</span><span class="value">${payeur.prenom} ${payeur.nom} &lt;${payeur.email}&gt;</span></div>
+      <div class="row"><span class="label">Méthode</span><span class="value">${paiement.methode}</span></div>
+      <div class="row"><span class="label">Date</span><span class="value">${new Date(paiement.date_paiement).toLocaleString('fr-FR')}</span></div>
+    </div>
+
+    <div class="box" style="margin-top:0">
+      <div class="row"><span class="label">Montant total</span><span class="value">${paiement.montant_total} DH</span></div>
+      <div class="row"><span class="label">Gain tuteur (85%)</span><span class="value">${paiement.gain_tuteur} DH</span></div>
+      <div class="row" style="border-bottom:none"><span class="label">Commission plateforme (15%)</span><span class="value" style="color:#7c3aed;font-weight:800">${paiement.commission_plateforme} DH</span></div>
+    </div>
+
+    <div class="total">
+      <span class="total-label">💰 Commission encaissée</span>
+      <span class="total-value">${paiement.commission_plateforme} DH</span>
+    </div>
+  `);
+
+  await transporter.sendMail({
+    from: `"SmartTutor" <${process.env.SMTP_USER}>`,
+    to,
+    subject: `🛡️ Paiement reçu — ${paiement.reference} — ${paiement.montant_total} DH`,
+    html,
+  });
+};
+
 // ── EMAIL 4 : Notification annulation au tuteur ──────────────────────────────
 const sendAnnulationTuteur = async ({ to, nom, seance, motif }) => {
   const transporter = createTransporter();
@@ -207,4 +245,61 @@ module.exports = {
   sendNotificationTuteur,
   sendConfirmationRemboursement,
   sendAnnulationTuteur,
+  sendNotificationAdminPlateforme,
+  sendCertificatEmail,
+  sendNotifTuteurCertificat,
 };
+
+// ── EMAIL 5 : Certificat à l'étudiant ─────────────────────────────────────────
+async function sendCertificatEmail({ to, nom, examenTitre, sallenom, numeroCert, score, tuteurNom }) {
+  const transporter = createTransporter();
+  const html = wrapTemplate(`
+    <div class="icon">🏆</div>
+    <div class="title">Félicitations, ${nom} !</div>
+    <div class="subtitle">Vous avez réussi l'examen et obtenu votre certificat SmartTutor.</div>
+    <div class="box">
+      <div class="row"><span class="label">Examen</span><span class="value">${examenTitre}</span></div>
+      <div class="row"><span class="label">Salle</span><span class="value">${sallenom}</span></div>
+      <div class="row"><span class="label">Tuteur</span><span class="value">${tuteurNom}</span></div>
+      <div class="row" style="border-bottom:none"><span class="label">Score</span><span class="value" style="color:#7c3aed;font-weight:800">${score}%</span></div>
+    </div>
+    <div class="total">
+      <span class="total-label">🎓 Numéro de certificat</span>
+      <span class="total-value" style="font-family:monospace;font-size:18px">${numeroCert}</span>
+    </div>
+    <p style="text-align:center;color:#64748b;font-size:13px;margin-top:16px">
+      Vérifiez votre certificat en ligne : <strong>/api/certificats/verifier/${numeroCert}</strong>
+    </p>
+  `);
+  await transporter.sendMail({
+    from: `"SmartTutor" <${process.env.SMTP_USER}>`,
+    to,
+    subject: `🏆 Certificat obtenu — ${examenTitre}`,
+    html,
+  });
+}
+
+// ── EMAIL 6 : Notification tuteur — certificat émis ──────────────────────────
+async function sendNotifTuteurCertificat({ to, tuteurNom, etudiantNom, examenTitre, score, numeroCert }) {
+  const transporter = createTransporter();
+  const html = wrapTemplate(`
+    <div class="icon">📋</div>
+    <div class="title">Nouveau certificat émis</div>
+    <div class="subtitle">Un de vos étudiants a validé votre examen.</div>
+    <div class="box">
+      <div class="row"><span class="label">Étudiant</span><span class="value">${etudiantNom}</span></div>
+      <div class="row"><span class="label">Examen</span><span class="value">${examenTitre}</span></div>
+      <div class="row" style="border-bottom:none"><span class="label">Score</span><span class="value" style="color:#7c3aed;font-weight:800">${score}%</span></div>
+    </div>
+    <div class="total">
+      <span class="total-label">Numéro certificat</span>
+      <span class="total-value" style="font-family:monospace">${numeroCert}</span>
+    </div>
+  `);
+  await transporter.sendMail({
+    from: `"SmartTutor" <${process.env.SMTP_USER}>`,
+    to,
+    subject: `📋 Certificat émis — ${etudiantNom} — ${examenTitre}`,
+    html,
+  });
+}

@@ -389,6 +389,110 @@ INSERT INTO config_plateforme (cle, valeur) VALUES
   ('commission_taux', '0.15'),
   ('commission_min',  '10')
 ON CONFLICT (cle) DO NOTHING;
+-- ═══════════════════════════════════════════════════════
+-- MIGRATION : RIB tuteur pour virement automatique
+-- Exécuter UNE SEULE FOIS sur votre base PostgreSQL
+-- ═══════════════════════════════════════════════════════
+ALTER TABLE tuteurs
+  ADD COLUMN IF NOT EXISTS rib        VARCHAR(34),
+  ADD COLUMN IF NOT EXISTS nom_banque VARCHAR(100);
+  -- ═══════════════════════════════════════════════════════════════════════
+-- MODULE EXAMENS & CERTIFICATS (à ajouter à ton schéma)
+-- ═══════════════════════════════════════════════════════════════════════
+
+-- 1. Table des examens
+CREATE TABLE IF NOT EXISTS examens (
+  id              BIGSERIAL PRIMARY KEY,
+  salle_id        BIGINT NOT NULL REFERENCES salles(id) ON DELETE CASCADE,
+  tuteur_id       BIGINT NOT NULL REFERENCES utilisateurs(id) ON DELETE CASCADE,
+  titre           VARCHAR(255) NOT NULL,
+  description     TEXT,
+  note_passage    DECIMAL(5,2) NOT NULL DEFAULT 70.00 CHECK (note_passage BETWEEN 0 AND 100),
+  duree_minutes   INT NOT NULL DEFAULT 30 CHECK (duree_minutes BETWEEN 5 AND 180),
+  max_tentatives  INT DEFAULT NULL,  -- NULL = illimité
+  statut          VARCHAR(20) DEFAULT 'BROUILLON' CHECK (statut IN ('BROUILLON','PUBLIE','ARCHIVE')),
+  created_at      TIMESTAMP DEFAULT NOW(),
+  published_at    TIMESTAMP
+);
+
+-- 2. Table des questions d'examen
+CREATE TABLE IF NOT EXISTS questions_examen (
+  id          BIGSERIAL PRIMARY KEY,
+  examen_id   BIGINT NOT NULL REFERENCES examens(id) ON DELETE CASCADE,
+  texte       TEXT NOT NULL,
+  type        VARCHAR(20) NOT NULL DEFAULT 'QCM' CHECK (type IN ('QCM','VRAI_FAUX')),
+  points      DECIMAL(5,2) NOT NULL DEFAULT 1.00 CHECK (points > 0),
+  ordre       INT NOT NULL DEFAULT 1
+);
+
+-- 3. Table des réponses possibles par question
+CREATE TABLE IF NOT EXISTS reponses_question (
+  id           BIGSERIAL PRIMARY KEY,
+  question_id  BIGINT NOT NULL REFERENCES questions_examen(id) ON DELETE CASCADE,
+  texte        TEXT NOT NULL,
+  est_correcte BOOLEAN NOT NULL DEFAULT false,
+  ordre        INT NOT NULL DEFAULT 1
+);
+
+-- 4. Table des tentatives des étudiants
+CREATE TABLE IF NOT EXISTS tentatives_examen (
+  id              BIGSERIAL PRIMARY KEY,
+  examen_id       BIGINT NOT NULL REFERENCES examens(id) ON DELETE CASCADE,
+  etudiant_id     BIGINT NOT NULL REFERENCES utilisateurs(id) ON DELETE CASCADE,
+  score_obtenu    DECIMAL(10,2) DEFAULT 0,
+  score_max       DECIMAL(10,2) DEFAULT 0,
+  pourcentage     DECIMAL(5,2)  DEFAULT 0,
+  statut          VARCHAR(20) DEFAULT 'EN_COURS' CHECK (statut IN ('EN_COURS','REUSSI','ECHOUE')),
+  started_at      TIMESTAMP DEFAULT NOW(),
+  submitted_at    TIMESTAMP,
+  expires_at      TIMESTAMP NOT NULL
+);
+
+-- 5. Table des réponses données par l'étudiant
+CREATE TABLE IF NOT EXISTS reponses_etudiant (
+  id            BIGSERIAL PRIMARY KEY,
+  tentative_id  BIGINT NOT NULL REFERENCES tentatives_examen(id) ON DELETE CASCADE,
+  question_id   BIGINT NOT NULL REFERENCES questions_examen(id)  ON DELETE CASCADE,
+  reponse_id    BIGINT REFERENCES reponses_question(id) ON DELETE SET NULL,
+  est_correcte  BOOLEAN DEFAULT false
+);
+
+-- 6. Table des certificats (table principale)
+CREATE TABLE IF NOT EXISTS certificats (
+  id                VARCHAR(36) PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  etudiant_id       BIGINT NOT NULL REFERENCES utilisateurs(id) ON DELETE CASCADE,
+  examen_id         BIGINT NOT NULL REFERENCES examens(id) ON DELETE CASCADE,
+  tentative_id      BIGINT NOT NULL REFERENCES tentatives_examen(id) ON DELETE CASCADE,
+  numero_certificat VARCHAR(30) UNIQUE NOT NULL,
+  score_obtenu      DECIMAL(5,2) NOT NULL,
+  url_pdf           VARCHAR(500),
+  est_valide        BOOLEAN NOT NULL DEFAULT true,
+  date_emission     TIMESTAMP DEFAULT NOW(),
+  UNIQUE(etudiant_id, examen_id)
+);
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- INDEXES (optimisation des performances)
+-- ═══════════════════════════════════════════════════════════════════════
+
+CREATE INDEX IF NOT EXISTS idx_examens_salle   ON examens(salle_id);
+CREATE INDEX IF NOT EXISTS idx_examens_tuteur  ON examens(tuteur_id);
+CREATE INDEX IF NOT EXISTS idx_examens_statut  ON examens(statut);
+
+CREATE INDEX IF NOT EXISTS idx_questions_examen ON questions_examen(examen_id);
+CREATE INDEX IF NOT EXISTS idx_reponses_question ON reponses_question(question_id);
+
+CREATE INDEX IF NOT EXISTS idx_tentatives_examen   ON tentatives_examen(examen_id);
+CREATE INDEX IF NOT EXISTS idx_tentatives_etudiant ON tentatives_examen(etudiant_id);
+CREATE INDEX IF NOT EXISTS idx_tentatives_statut   ON tentatives_examen(statut);
+
+CREATE INDEX IF NOT EXISTS idx_rep_etudiant_tentative ON reponses_etudiant(tentative_id);
+CREATE INDEX IF NOT EXISTS idx_rep_etudiant_question  ON reponses_etudiant(question_id);
+
+CREATE INDEX IF NOT EXISTS idx_certificats_etudiant ON certificats(etudiant_id);
+CREATE INDEX IF NOT EXISTS idx_certificats_examen   ON certificats(examen_id);
+CREATE INDEX IF NOT EXISTS idx_certificats_numero   ON certificats(numero_certificat);
+CREATE INDEX IF NOT EXISTS idx_certificats_valide   ON certificats(est_valide);
 
 -- Admin account initial
 INSERT INTO utilisateurs (prenom, nom, email, mot_de_passe, role)

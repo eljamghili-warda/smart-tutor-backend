@@ -92,3 +92,21 @@ router.get   ('/admin/revenus',                  authenticate, requireRole('admi
 router.get   ('/admin/paiements',                authenticate, requireRole('admin'), paiementCtrl.getAllPaiements);
 
 module.exports = router;
+// ─── Examens & Certificats ────────────────────────────────────────────────────
+const examenCtrl = require('../controllers/examen.controller');
+
+// Examens
+router.get ('/examens/salle/:salleId',         authenticate, examenCtrl.getExamensSalle);
+router.post('/examens',                         authenticate, requireRole('tuteur'), requireActiveTuteur, examenCtrl.createExamen);
+router.get ('/examens/:id',                     authenticate, examenCtrl.getExamen);
+router.put ('/examens/:id/publier',             authenticate, requireRole('tuteur'), examenCtrl.publierExamen);
+router.post('/examens/:id/questions',           authenticate, requireRole('tuteur'), examenCtrl.addQuestion);
+
+// Tentatives
+router.post('/examens/:id/tentatives',          authenticate, requireRole('etudiant'), examenCtrl.demarrerTentative);
+router.put ('/tentatives/:tentativeId/soumettre', authenticate, requireRole('etudiant'), examenCtrl.soumettreReponses);
+
+// Certificats
+router.get('/certificats/mes-certificats',      authenticate, examenCtrl.mesCertificats);
+router.get('/certificats/verifier/:numero',     examenCtrl.verifierCertificat); // public
+router.put('/admin/certificats/:id/revoquer',   authenticate, requireRole('admin'), examenCtrl.revoquerCertificat);

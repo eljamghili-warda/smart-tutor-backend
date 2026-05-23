@@ -22,10 +22,13 @@ const getPaiementSeance = async (req, res) => {
               sa.nom   as salle_nom,
               u.prenom as tuteur_prenom,
               u.nom    as tuteur_nom,
-              u.email  as tuteur_email
+              u.email  as tuteur_email,
+              t.rib         as tuteur_rib,
+              t.nom_banque  as tuteur_nom_banque
        FROM seances s
        JOIN salles sa ON s.salle_id = sa.id
        LEFT JOIN utilisateurs u ON s.tuteur_id = u.id
+       LEFT JOIN tuteurs t ON u.id = t.utilisateur_id
        WHERE s.id=$1`,
       [seanceId]
     );
@@ -98,10 +101,13 @@ const payerSeance = async (req, res) => {
               sa.id    as salle_id,
               u.prenom as tuteur_prenom,
               u.nom    as tuteur_nom,
-              u.email  as tuteur_email
+              u.email  as tuteur_email,
+              t.rib         as tuteur_rib,
+              t.nom_banque  as tuteur_nom_banque
        FROM seances s
        JOIN salles sa ON s.salle_id = sa.id
        LEFT JOIN utilisateurs u ON s.tuteur_id = u.id
+       LEFT JOIN tuteurs t ON u.id = t.utilisateur_id
        WHERE s.id=$1`,
       [seanceId]
     );
@@ -180,6 +186,16 @@ const payerSeance = async (req, res) => {
 
     const paiement = paiementRes.rows[0];
 
+    // ── VIREMENT AUTOMATIQUE SIMULÉ AU TUTEUR (85%) ──────────────────────────
+    // En production : appel API bancaire (Chargily, virement RIB, etc.)
+    // Ici on log le virement et on le marque comme effectué
+    if (seance.tuteur_rib) {
+      console.log(`[VIREMENT] ${gainTuteur} DH → RIB ${seance.tuteur_rib} (${seance.tuteur_prenom} ${seance.tuteur_nom} / ${seance.tuteur_nom_banque || 'banque inconnue'})`);
+      // En production : await virementBancaire({ rib: seance.tuteur_rib, montant: gainTuteur, reference })
+    } else {
+      console.warn(`[VIREMENT] Tuteur ${seance.tuteur_id} n'a pas de RIB configuré — virement en attente`);
+    }
+
     // Emails automatiques (asynchrones — ne bloquent pas la réponse)
     const payeurRes = await pool.query(
       `SELECT prenom, nom, email FROM utilisateurs WHERE id=$1`, [req.user.id]
@@ -198,7 +214,7 @@ const payerSeance = async (req, res) => {
       }).catch(console.error);
     }
 
-    // Email au tuteur (notification séance confirmée)
+    // Email au tuteur (notification séance confirmée + montant reçu)
     if (seance.tuteur_email) {
       emailService.sendNotificationTuteur({
         to:     seance.tuteur_email,
@@ -206,6 +222,21 @@ const payerSeance = async (req, res) => {
         seance,
         salle:  { nom: seance.salle_nom },
         payeur: { prenom: payeur?.prenom, nom: payeur?.nom },
+        paiement,
+        gainTuteur,
+        rib: seance.tuteur_rib,
+      }).catch(console.error);
+    }
+
+    // Email à l'admin plateforme (notification paiement reçu)
+    const adminEmail = process.env.ADMIN_EMAIL || process.env.SMTP_USER;
+    if (adminEmail) {
+      emailService.sendNotificationAdminPlateforme({
+        to:     adminEmail,
+        seance,
+        salle:  { nom: seance.salle_nom },
+        tuteur: { prenom: seance.tuteur_prenom, nom: seance.tuteur_nom, email: seance.tuteur_email },
+        payeur: { prenom: payeur?.prenom, nom: payeur?.nom, email: payeur?.email },
         paiement,
       }).catch(console.error);
     }
@@ -218,6 +249,13 @@ const payerSeance = async (req, res) => {
       montantTotal,
       gainTuteur,
       commission,
+      tuteur: {
+        prenom:    seance.tuteur_prenom,
+        nom:       seance.tuteur_nom,
+        rib:       seance.tuteur_rib,
+        nomBanque: seance.tuteur_nom_banque,
+        virementEffectue: !!seance.tuteur_rib,
+      },
     });
   } catch (err) {
     await client.query('ROLLBACK');
