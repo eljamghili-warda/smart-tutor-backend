@@ -493,6 +493,35 @@ CREATE INDEX IF NOT EXISTS idx_certificats_etudiant ON certificats(etudiant_id);
 CREATE INDEX IF NOT EXISTS idx_certificats_examen   ON certificats(examen_id);
 CREATE INDEX IF NOT EXISTS idx_certificats_numero   ON certificats(numero_certificat);
 CREATE INDEX IF NOT EXISTS idx_certificats_valide   ON certificats(est_valide);
+-- ═══════════════════════════════════════════════════════════════
+-- MIGRATION v2 — Module Examens complet
+-- Ajoute les champs manquants + PDF certificat
+-- ═══════════════════════════════════════════════════════════════
+
+-- 1. Nouveaux champs sur la table examens
+ALTER TABLE examens
+  ADD COLUMN IF NOT EXISTS date_debut             TIMESTAMP,
+  ADD COLUMN IF NOT EXISTS date_limite            TIMESTAMP,
+  ADD COLUMN IF NOT EXISTS date_affichage_resultats TIMESTAMP,
+  ADD COLUMN IF NOT EXISTS mode_affichage         VARCHAR(20) DEFAULT 'UNE_PAR_UNE' CHECK (mode_affichage IN ('UNE_PAR_UNE','LISTE_COMPLETE')),
+  ADD COLUMN IF NOT EXISTS melanger_questions     BOOLEAN DEFAULT TRUE,
+  ADD COLUMN IF NOT EXISTS melanger_reponses      BOOLEAN DEFAULT TRUE;
+
+-- 2. Ajouter statut SOUMIS dans tentatives_examen
+ALTER TABLE tentatives_examen
+  DROP CONSTRAINT IF EXISTS tentatives_examen_statut_check;
+ALTER TABLE tentatives_examen
+  ADD CONSTRAINT tentatives_examen_statut_check
+  CHECK (statut IN ('EN_COURS','SOUMIS','REUSSI','ECHOUE'));
+
+-- 3. url_pdf déjà dans certificats — s'assurer qu'elle existe
+ALTER TABLE certificats
+  ADD COLUMN IF NOT EXISTS url_pdf VARCHAR(500);
+
+-- 4. Index supplémentaires
+CREATE INDEX IF NOT EXISTS idx_examens_date_debut  ON examens(date_debut);
+CREATE INDEX IF NOT EXISTS idx_examens_date_limite ON examens(date_limite);
+CREATE INDEX IF NOT EXISTS idx_tentatives_statut2  ON tentatives_examen(etudiant_id, statut);
 
 -- Admin account initial
 INSERT INTO utilisateurs (prenom, nom, email, mot_de_passe, role)

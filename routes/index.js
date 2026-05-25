@@ -95,18 +95,29 @@ module.exports = router;
 // ─── Examens & Certificats ────────────────────────────────────────────────────
 const examenCtrl = require('../controllers/examen.controller');
 
-// Examens
-router.get ('/examens/salle/:salleId',         authenticate, examenCtrl.getExamensSalle);
-router.post('/examens',                         authenticate, requireRole('tuteur'), requireActiveTuteur, examenCtrl.createExamen);
-router.get ('/examens/:id',                     authenticate, examenCtrl.getExamen);
-router.put ('/examens/:id/publier',             authenticate, requireRole('tuteur'), examenCtrl.publierExamen);
-router.post('/examens/:id/questions',           authenticate, requireRole('tuteur'), examenCtrl.addQuestion);
+// Examens — routes statiques AVANT /:id
+router.get ('/examens/mes-examens',              authenticate, requireRole('tuteur'), examenCtrl.getMesExamens);
+router.get ('/examens/mes-examens-etudiant',     authenticate, requireRole('etudiant'), examenCtrl.getMesExamensEtudiant);
+router.get ('/examens/salle/:salleId',           authenticate, examenCtrl.getExamensSalle);
+router.post('/examens',                          authenticate, requireRole('tuteur'), requireActiveTuteur, examenCtrl.createExamen);
+
+// Examens — routes avec :id
+router.get ('/examens/:id',                      authenticate, examenCtrl.getExamen);
+router.put ('/examens/:id',                      authenticate, requireRole('tuteur'), examenCtrl.updateExamen);
+router.put ('/examens/:id/publier',              authenticate, requireRole('tuteur'), examenCtrl.publierExamen);
+router.put ('/examens/:id/archiver',             authenticate, requireRole('tuteur'), examenCtrl.archiverExamen);
+
+// Questions
+router.post  ('/examens/:id/questions',                                  authenticate, requireRole('tuteur'), examenCtrl.addQuestion);
+router.put   ('/examens/:examId/questions/:questionId',                  authenticate, requireRole('tuteur'), examenCtrl.updateQuestion);
+router.delete('/examens/:examId/questions/:questionId',                  authenticate, requireRole('tuteur'), examenCtrl.deleteQuestion);
 
 // Tentatives
-router.post('/examens/:id/tentatives',          authenticate, requireRole('etudiant'), examenCtrl.demarrerTentative);
-router.put ('/tentatives/:tentativeId/soumettre', authenticate, requireRole('etudiant'), examenCtrl.soumettreReponses);
+router.post('/examens/:id/tentatives',           authenticate, requireRole('etudiant'), examenCtrl.demarrerTentative);
+router.put ('/tentatives/:tentativeId/soumettre',authenticate, requireRole('etudiant'), examenCtrl.soumettreReponses);
+router.get ('/tentatives/:tentativeId/resultats',authenticate, requireRole('etudiant'), examenCtrl.getResultatsTentative);
 
 // Certificats
-router.get('/certificats/mes-certificats',      authenticate, examenCtrl.mesCertificats);
-router.get('/certificats/verifier/:numero',     examenCtrl.verifierCertificat); // public
-router.put('/admin/certificats/:id/revoquer',   authenticate, requireRole('admin'), examenCtrl.revoquerCertificat);
+router.get('/certificats/mes-certificats',       authenticate, examenCtrl.mesCertificats);
+router.get('/certificats/verifier/:numero',      examenCtrl.verifierCertificat); // public
+router.put('/admin/certificats/:id/revoquer',    authenticate, requireRole('admin'), examenCtrl.revoquerCertificat);
