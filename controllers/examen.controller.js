@@ -387,37 +387,54 @@ const getExamen = async (req, res) => {
     if (!examRes.rows.length) return res.status(404).json({ error: 'Examen introuvable' });
     const examen = examRes.rows[0];
 
-    const isTuteur = req.user.id === examen.tuteur_id || req.user.role === 'admin';
+    // Comparaison string/int safe
+    const isTuteur = String(req.user.id) === String(examen.tuteur_id) || req.user.role === 'admin';
 
-    let orderClause = 'ORDER BY q.ordre';
-    if (!isTuteur && examen.melanger_questions) orderClause = 'ORDER BY RANDOM()';
-
+    // ORDER BY dans un GROUP BY doit utiliser les colonnes du GROUP BY
+    // On charge toujours par ordre fixe puis on mélange en JS si besoin
     const qRes = await pool.query(
-      `SELECT q.*, json_agg(r ORDER BY r.ordre) as reponses
+      `SELECT q.*,
+              COALESCE(
+                json_agg(
+                  json_build_object('id', r.id, 'texte', r.texte, 'ordre', r.ordre, 'est_correcte', r.est_correcte)
+                  ORDER BY r.ordre
+                ) FILTER (WHERE r.id IS NOT NULL),
+                '[]'
+              ) as reponses
        FROM questions_examen q
        LEFT JOIN reponses_question r ON r.question_id=q.id
        WHERE q.examen_id=$1
-       GROUP BY q.id ${orderClause}`, [id]
+       GROUP BY q.id
+       ORDER BY q.ordre`, [id]
     );
 
-    const questions = qRes.rows.map(q => {
-      let reponses = (q.reponses || []).filter(r => r !== null);
+    let questions = qRes.rows.map(q => {
+      let reponses = Array.isArray(q.reponses) ? q.reponses.filter(r => r && r.id) : [];
+      // Mélanger les réponses en JS
       if (!isTuteur && examen.melanger_reponses) {
-        // Mélanger les réponses
-        reponses = reponses.sort(() => Math.random() - 0.5);
+        reponses = [...reponses].sort(() => Math.random() - 0.5);
       }
       return {
         ...q,
         reponses: reponses.map(r => ({
-          id: r.id, texte: r.texte, ordre: r.ordre,
+          id: r.id,
+          texte: r.texte,
+          ordre: r.ordre,
+          // Masquer est_correcte pour les étudiants
           ...(isTuteur ? { est_correcte: r.est_correcte } : {}),
         })),
       };
     });
 
+    // Mélanger les questions en JS si nécessaire
+    if (!isTuteur && examen.melanger_questions) {
+      questions = [...questions].sort(() => Math.random() - 0.5);
+    }
+
+    console.log(`📝 getExamen #${id} → ${questions.length} questions, user=${req.user.id}, isTuteur=${isTuteur}`);
     res.json({ ...examen, questions });
   } catch (err) {
-    console.error(err);
+    console.error('getExamen error:', err);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 };

@@ -99,7 +99,7 @@ const examenCtrl = require('../controllers/examen.controller');
 router.get ('/examens/mes-examens',              authenticate, requireRole('tuteur'), examenCtrl.getMesExamens);
 router.get ('/examens/mes-examens-etudiant',     authenticate, requireRole('etudiant'), examenCtrl.getMesExamensEtudiant);
 router.get ('/examens/salle/:salleId',           authenticate, examenCtrl.getExamensSalle);
-router.post('/examens',                          authenticate, requireRole('tuteur'), requireActiveTuteur, examenCtrl.createExamen);
+router.post('/examens',                          authenticate, requireRole('tuteur'), examenCtrl.createExamen);
 
 // Examens — routes avec :id
 router.get ('/examens/:id',                      authenticate, examenCtrl.getExamen);
@@ -113,9 +113,9 @@ router.put   ('/examens/:examId/questions/:questionId',                  authent
 router.delete('/examens/:examId/questions/:questionId',                  authenticate, requireRole('tuteur'), examenCtrl.deleteQuestion);
 
 // Tentatives
-router.post('/examens/:id/tentatives',           authenticate, requireRole('etudiant'), examenCtrl.demarrerTentative);
-router.put ('/tentatives/:tentativeId/soumettre',authenticate, requireRole('etudiant'), examenCtrl.soumettreReponses);
-router.get ('/tentatives/:tentativeId/resultats',authenticate, requireRole('etudiant'), examenCtrl.getResultatsTentative);
+router.post('/examens/:id/tentatives',           authenticate, examenCtrl.demarrerTentative);
+router.put ('/tentatives/:tentativeId/soumettre',authenticate, examenCtrl.soumettreReponses);
+router.get ('/tentatives/:tentativeId/resultats',authenticate, examenCtrl.getResultatsTentative);
 
 // Certificats
 router.get('/certificats/mes-certificats',       authenticate, examenCtrl.mesCertificats);
