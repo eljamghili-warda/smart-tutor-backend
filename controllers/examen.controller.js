@@ -411,7 +411,7 @@ const getExamen = async (req, res) => {
     let questions = qRes.rows.map(q => {
       let reponses = Array.isArray(q.reponses) ? q.reponses.filter(r => r && r.id) : [];
       // Mélanger les réponses en JS
-      if (!isTuteur && examen.melanger_reponses) {
+      if (!isTuteur && (examen.melanger_reponses !== false)) {
         reponses = [...reponses].sort(() => Math.random() - 0.5);
       }
       return {
@@ -427,7 +427,7 @@ const getExamen = async (req, res) => {
     });
 
     // Mélanger les questions en JS si nécessaire
-    if (!isTuteur && examen.melanger_questions) {
+    if (!isTuteur && (examen.melanger_questions !== false)) {
       questions = [...questions].sort(() => Math.random() - 0.5);
     }
 
@@ -512,16 +512,18 @@ const demarrerTentative = async (req, res) => {
 // ══════════════════════════════════════════════════════════════════
 const soumettreReponses = async (req, res) => {
   const { tentativeId } = req.params;
-  const { reponses = [] } = req.body; // [{ questionId, reponseId }]
+  // Accepter { reponses: [...] } ou directement [...] 
+  let reponses = req.body?.reponses ?? req.body ?? [];
+  if (!Array.isArray(reponses)) reponses = [];
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     const tentRes = await client.query(
       `SELECT t.*, e.note_passage, e.titre as examen_titre, e.salle_id,
-              e.date_affichage_resultats,
               s.nom as salle_nom,
-              u.prenom as tuteur_prenom, u.nom as tuteur_nom, u.email as tuteur_email
+              u.prenom as tuteur_prenom, u.nom as tuteur_nom, u.email as tuteur_email,
+              NULL::timestamp as date_affichage_resultats
        FROM tentatives_examen t
        JOIN examens e ON t.examen_id=e.id
        JOIN salles s ON e.salle_id=s.id
@@ -529,6 +531,16 @@ const soumettreReponses = async (req, res) => {
        WHERE t.id=$1 AND t.etudiant_id=$2`,
       [tentativeId, req.user.id]
     );
+    // Récupérer date_affichage_resultats séparément (colonne ajoutée par migration)
+    try {
+      const darRes = await client.query(
+        `SELECT date_affichage_resultats FROM examens WHERE id=$1`,
+        [tentRes.rows[0]?.examen_id]
+      );
+      if (darRes.rows.length && tentRes.rows.length) {
+        tentRes.rows[0].date_affichage_resultats = darRes.rows[0].date_affichage_resultats;
+      }
+    } catch (_) { /* colonne pas encore créée — résultats immédiats */ }
     if (!tentRes.rows.length) return res.status(404).json({ error: 'Tentative introuvable.' });
     const tentative = tentRes.rows[0];
 
@@ -557,11 +569,18 @@ const soumettreReponses = async (req, res) => {
       const correct = repCorrecte.rows.length && repCorrecte.rows[0].est_correcte;
       if (correct) scoreObtenu += parseFloat(repCorrecte.rows[0].points);
 
-      await client.query(
-        `INSERT INTO reponses_etudiant (tentative_id, question_id, reponse_id, est_correcte)
-         VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
-        [tentativeId, rep.questionId, rep.reponseId, correct]
+      // Vérifier si déjà inséré (évite l'erreur si pas de contrainte UNIQUE)
+      const existRes = await client.query(
+        `SELECT id FROM reponses_etudiant WHERE tentative_id=$1 AND question_id=$2 LIMIT 1`,
+        [tentativeId, rep.questionId]
       );
+      if (!existRes.rows.length) {
+        await client.query(
+          `INSERT INTO reponses_etudiant (tentative_id, question_id, reponse_id, est_correcte)
+           VALUES ($1,$2,$3,$4)`,
+          [tentativeId, rep.questionId, rep.reponseId, correct]
+        );
+      }
     }
 
     const pourcentage = tentative.score_max > 0
@@ -667,13 +686,24 @@ const getResultatsTentative = async (req, res) => {
   const { tentativeId } = req.params;
   try {
     const tentRes = await pool.query(
-      `SELECT t.*, e.titre as examen_titre, e.date_affichage_resultats,
-              e.note_passage, e.duree_minutes
+      `SELECT t.*, e.titre as examen_titre,
+              e.note_passage, e.duree_minutes,
+              NULL::timestamp as date_affichage_resultats
        FROM tentatives_examen t
        JOIN examens e ON t.examen_id=e.id
        WHERE t.id=$1 AND t.etudiant_id=$2`,
       [tentativeId, req.user.id]
     );
+    // Récupérer date_affichage_resultats séparément (colonne ajoutée par migration)
+    if (tentRes.rows.length) {
+      try {
+        const darRes = await pool.query(
+          `SELECT date_affichage_resultats FROM examens WHERE id=$1`,
+          [tentRes.rows[0].examen_id]
+        );
+        if (darRes.rows.length) tentRes.rows[0].date_affichage_resultats = darRes.rows[0].date_affichage_resultats;
+      } catch (_) { /* colonne pas encore créée */ }
+    }
     if (!tentRes.rows.length)
       return res.status(404).json({ error: 'Tentative introuvable.' });
 
