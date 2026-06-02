@@ -113,7 +113,9 @@ router.put   ('/examens/:examId/questions/:questionId',                  authent
 router.delete('/examens/:examId/questions/:questionId',                  authenticate, requireRole('tuteur'), examenCtrl.deleteQuestion);
 
 // Tentatives
-router.post('/examens/:id/tentatives',           authenticate, examenCtrl.demarrerTentative);
+router.get ('/examens/:id/stats',                 authenticate, requireRole('tuteur'), examenCtrl.getStatsExamen);
+router.get ('/examens/:id/ma-derniere-tentative',  authenticate, examenCtrl.getMaDerniereTentative);
+router.post('/examens/:id/tentatives',             authenticate, examenCtrl.demarrerTentative);
 router.put ('/tentatives/:tentativeId/soumettre',authenticate, examenCtrl.soumettreReponses);
 router.get ('/tentatives/:tentativeId/resultats',authenticate, examenCtrl.getResultatsTentative);
 
