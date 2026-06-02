@@ -1,5 +1,16 @@
 const { pool } = require('../config/db');
 const emailService = require('../services/email.service');
+const path = require('path');
+const fs   = require('fs');
+
+// Charger le service PDF de façon défensive
+let genererCertificatPDF = null;
+try {
+  const certService = require('../services/certificat.service');
+  genererCertificatPDF = certService.genererCertificatPDF;
+} catch (e) {
+  console.warn('⚠️  certificat.service.js manquant — PDF désactivé:', e.message);
+}
 
 // ══════════════════════════════════════════════════════════════════
 // TUTEUR — Créer un examen (BROUILLON)
@@ -132,8 +143,8 @@ const addQuestion = async (req, res) => {
     );
     res.status(201).json({ ...question, reponses: repRes.rows });
   } catch (err) {
-    await client.query('ROLLBACK');
-    console.error(err);
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    console.error('DB error:', err);
     res.status(500).json({ error: 'Erreur serveur' });
   } finally { client.release(); }
 };
@@ -177,8 +188,8 @@ const updateQuestion = async (req, res) => {
     );
     res.json({ ...qRes.rows[0], reponses: repRes.rows });
   } catch (err) {
-    await client.query('ROLLBACK');
-    console.error(err);
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    console.error('DB error:', err);
     res.status(500).json({ error: 'Erreur serveur' });
   } finally { client.release(); }
 };
@@ -500,8 +511,8 @@ const demarrerTentative = async (req, res) => {
     await client.query('COMMIT');
     res.status(201).json({ tentative: tentRes.rows[0], examen, expiresAt });
   } catch (err) {
-    await client.query('ROLLBACK');
-    console.error(err);
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    console.error('DB error:', err);
     res.status(500).json({ error: 'Erreur serveur' });
   } finally { client.release(); }
 };
@@ -540,7 +551,10 @@ const soumettreReponses = async (req, res) => {
       if (darRes.rows.length && tentRes.rows.length) {
         tentRes.rows[0].date_affichage_resultats = darRes.rows[0].date_affichage_resultats;
       }
-    } catch (_) { /* colonne pas encore créée — résultats immédiats */ }
+    } catch (_) { /* colonne pas encore créée — résultats immédiats */ 
+      try { await client.query('ROLLBACK'); } catch (__) {}
+      await client.query('BEGIN');
+    }
     if (!tentRes.rows.length) return res.status(404).json({ error: 'Tentative introuvable.' });
     const tentative = tentRes.rows[0];
 
@@ -597,6 +611,7 @@ const soumettreReponses = async (req, res) => {
 
     // ─── Certificat automatique si réussi ────────────────
     let certificat = null;
+    let _pdfOpts   = null;
     if (reussi) {
       const certExist = await client.query(
         `SELECT id FROM certificats WHERE etudiant_id=$1 AND examen_id=$2`,
@@ -630,34 +645,35 @@ const soumettreReponses = async (req, res) => {
             `SELECT matiere FROM salles WHERE id=$1`, [tentative.salle_id]
           );
           matiere = matiereRes.rows[0]?.matiere || '';
-        } catch (_) {}
-
-        // Générer le PDF
-        let urlPdf = null;
-        try {
-          urlPdf = await genererCertificatPDF({
-            numeroCert,
-            etudiantPrenom: etudiant2.prenom || '',
-            etudiantNom:    etudiant2.nom    || '',
-            examenTitre:    tentative.examen_titre,
-            salleNom:       tentative.salle_nom,
-            matiere,
-            tuteurNom:      `${tentative.tuteur_prenom} ${tentative.tuteur_nom}`,
-            scoreObtenu:    pourcentage,
-            nbSeances,
-            dureeTotaleMin,
-            dateEmission:   new Date(),
-          });
-        } catch (pdfErr) {
-          console.error('PDF certificat error:', pdfErr.message);
+        } catch (statErr) {
+          // Si la requête a cassé la tx, on la réinitialise proprement
+          try { await client.query('ROLLBACK'); } catch (_) {}
+          await client.query('BEGIN');
         }
 
+        // Insérer le certificat SANS le PDF (PDF généré après COMMIT)
         const certRes = await client.query(
-          `INSERT INTO certificats (etudiant_id, examen_id, tentative_id, numero_certificat, score_obtenu, url_pdf)
-           VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-          [req.user.id, tentative.examen_id, tentativeId, numeroCert, pourcentage, urlPdf]
+          `INSERT INTO certificats (etudiant_id, examen_id, tentative_id, numero_certificat, score_obtenu)
+           VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+          [req.user.id, tentative.examen_id, tentativeId, numeroCert, pourcentage]
         );
         certificat = certRes.rows[0];
+        
+        // Stocker les infos pour générer le PDF après COMMIT (hors transaction)
+        _pdfOpts = {
+          certId: certificat.id,
+          numeroCert,
+          etudiantPrenom: etudiant2.prenom || '',
+          etudiantNom:    etudiant2.nom    || '',
+          examenTitre:    tentative.examen_titre,
+          salleNom:       tentative.salle_nom,
+          matiere,
+          tuteurNom:      `${tentative.tuteur_prenom} ${tentative.tuteur_nom}`,
+          scoreObtenu:    pourcentage,
+          nbSeances,
+          dureeTotaleMin,
+          dateEmission:   new Date(),
+        };
 
         // Emails
         const etudiantRes = await client.query(
@@ -698,6 +714,22 @@ const soumettreReponses = async (req, res) => {
 
     await client.query('COMMIT');
 
+    // ─── Générer le PDF APRÈS COMMIT (hors transaction) ─────────────
+    if (_pdfOpts && genererCertificatPDF) {
+      setImmediate(async () => {
+        try {
+          const urlPdf = await genererCertificatPDF(_pdfOpts);
+          await pool.query(
+            `UPDATE certificats SET url_pdf=$1 WHERE id=$2`,
+            [urlPdf, _pdfOpts.certId]
+          );
+          if (certificat) certificat.url_pdf = urlPdf;
+        } catch (pdfErr) {
+          console.error('PDF certificat error (post-commit):', pdfErr.message);
+        }
+      });
+    }
+
     // Déterminer si les résultats sont affichables maintenant
     const maintenant = new Date();
     const dateAffichage = tentative.date_affichage_resultats
@@ -716,8 +748,8 @@ const soumettreReponses = async (req, res) => {
       dateAffichageResultats: tentative.date_affichage_resultats,
     });
   } catch (err) {
-    await client.query('ROLLBACK');
-    console.error(err);
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    console.error('DB error:', err);
     res.status(500).json({ error: 'Erreur serveur' });
   } finally { client.release(); }
 };
