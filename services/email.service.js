@@ -250,32 +250,83 @@ module.exports = {
   sendNotifTuteurCertificat,
 };
 
-// ── EMAIL 5 : Certificat à l'étudiant ─────────────────────────────────────────
-async function sendCertificatEmail({ to, nom, examenTitre, sallenom, numeroCert, score, tuteurNom }) {
+// ── EMAIL 5 : Certificat à l'étudiant (avec pièce jointe PDF + bouton téléchargement) ──
+async function sendCertificatEmail({ to, nom, examenTitre, sallenom, numeroCert, score, tuteurNom, pdfPath }) {
   const transporter = createTransporter();
+
+  const appUrl = process.env.APP_URL || 'http://localhost:3000';
+  const downloadUrl = `${appUrl}/api/certificats/telecharger/${numeroCert}`;
+  const verifyUrl   = `${appUrl}/api/certificats/verifier/${numeroCert}`;
+  const linkedInUrl = `https://www.linkedin.com/profile/add?startTask=CERTIFICATION_NAME`
+    + `&name=${encodeURIComponent(examenTitre)}`
+    + `&organizationName=${encodeURIComponent('SmartEdu')}`
+    + `&certUrl=${encodeURIComponent(verifyUrl)}`
+    + `&certId=${encodeURIComponent(numeroCert)}`;
+
   const html = wrapTemplate(`
     <div class="icon">🏆</div>
     <div class="title">Félicitations, ${nom} !</div>
-    <div class="subtitle">Vous avez réussi l'examen et obtenu votre certificat SmartTutor.</div>
+    <div class="subtitle">Vous avez réussi l'examen et obtenu votre certificat SmartEdu.</div>
+
     <div class="box">
       <div class="row"><span class="label">Examen</span><span class="value">${examenTitre}</span></div>
       <div class="row"><span class="label">Salle</span><span class="value">${sallenom}</span></div>
-      <div class="row"><span class="label">Tuteur</span><span class="value">${tuteurNom}</span></div>
-      <div class="row" style="border-bottom:none"><span class="label">Score</span><span class="value" style="color:#7c3aed;font-weight:800">${score}%</span></div>
+      <div class="row"><span class="label">Instructeur</span><span class="value">${tuteurNom}</span></div>
+      <div class="row" style="border-bottom:none">
+        <span class="label">Score obtenu</span>
+        <span class="value" style="color:#7c3aed;font-weight:800;font-size:16px">${score}%</span>
+      </div>
     </div>
+
     <div class="total">
       <span class="total-label">🎓 Numéro de certificat</span>
-      <span class="total-value" style="font-family:monospace;font-size:18px">${numeroCert}</span>
+      <span class="total-value" style="font-family:monospace;font-size:16px">${numeroCert}</span>
     </div>
-    <p style="text-align:center;color:#64748b;font-size:13px;margin-top:16px">
-      Vérifiez votre certificat en ligne : <strong>/api/certificats/verifier/${numeroCert}</strong>
+
+    <!-- Bouton Télécharger PDF -->
+    <div style="text-align:center;margin:24px 0 12px">
+      <a href="${downloadUrl}"
+         style="display:inline-block;padding:14px 32px;background:linear-gradient(135deg,#7c3aed,#4f46e5);
+                color:#fff;font-weight:700;font-size:15px;border-radius:12px;text-decoration:none;
+                letter-spacing:0.3px;box-shadow:0 4px 14px rgba(124,58,237,0.4)">
+        ⬇️ Télécharger mon certificat (PDF)
+      </a>
+    </div>
+
+    <!-- Bouton Partager LinkedIn -->
+    <div style="text-align:center;margin:0 0 20px">
+      <a href="${linkedInUrl}" target="_blank"
+         style="display:inline-block;padding:11px 24px;background:#0A66C2;
+                color:#fff;font-weight:600;font-size:13px;border-radius:10px;text-decoration:none;">
+        🔗 Ajouter à votre profil LinkedIn
+      </a>
+    </div>
+
+    <p style="text-align:center;color:#64748b;font-size:12px;margin-top:8px">
+      Votre certificat est également joint en pièce jointe à cet email.<br/>
+      Vérifier l'authenticité : <a href="${verifyUrl}" style="color:#7c3aed">${verifyUrl}</a>
     </p>
   `);
+
+  // Construire les pièces jointes si le PDF existe
+  const attachments = [];
+  if (pdfPath) {
+    const fs = require('fs');
+    if (fs.existsSync(pdfPath)) {
+      attachments.push({
+        filename: `Certificat-SmartEdu-${numeroCert}.pdf`,
+        path: pdfPath,
+        contentType: 'application/pdf',
+      });
+    }
+  }
+
   await transporter.sendMail({
-    from: `"SmartTutor" <${process.env.SMTP_USER}>`,
+    from: `"SmartEdu" <${process.env.SMTP_USER}>`,
     to,
-    subject: `🏆 Certificat obtenu — ${examenTitre}`,
+    subject: `🏆 Certificat SmartEdu — ${examenTitre}`,
     html,
+    attachments,
   });
 }
 
@@ -285,11 +336,14 @@ async function sendNotifTuteurCertificat({ to, tuteurNom, etudiantNom, examenTit
   const html = wrapTemplate(`
     <div class="icon">📋</div>
     <div class="title">Nouveau certificat émis</div>
-    <div class="subtitle">Un de vos étudiants a validé votre examen.</div>
+    <div class="subtitle">Un de vos étudiants a validé votre examen avec succès.</div>
     <div class="box">
       <div class="row"><span class="label">Étudiant</span><span class="value">${etudiantNom}</span></div>
       <div class="row"><span class="label">Examen</span><span class="value">${examenTitre}</span></div>
-      <div class="row" style="border-bottom:none"><span class="label">Score</span><span class="value" style="color:#7c3aed;font-weight:800">${score}%</span></div>
+      <div class="row" style="border-bottom:none">
+        <span class="label">Score obtenu</span>
+        <span class="value" style="color:#7c3aed;font-weight:800">${score}%</span>
+      </div>
     </div>
     <div class="total">
       <span class="total-label">Numéro certificat</span>
@@ -297,7 +351,7 @@ async function sendNotifTuteurCertificat({ to, tuteurNom, etudiantNom, examenTit
     </div>
   `);
   await transporter.sendMail({
-    from: `"SmartTutor" <${process.env.SMTP_USER}>`,
+    from: `"SmartEdu" <${process.env.SMTP_USER}>`,
     to,
     subject: `📋 Certificat émis — ${etudiantNom} — ${examenTitre}`,
     html,
