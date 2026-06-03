@@ -1,16 +1,5 @@
 const { pool } = require('../config/db');
 const emailService = require('../services/email.service');
-const path = require('path');
-const fs   = require('fs');
-
-// Charger le service PDF de façon défensive
-let genererCertificatPDF = null;
-try {
-  const certService = require('../services/certificat.service');
-  genererCertificatPDF = certService.genererCertificatPDF;
-} catch (e) {
-  console.warn('⚠️  certificat.service.js manquant — PDF désactivé:', e.message);
-}
 
 // ══════════════════════════════════════════════════════════════════
 // TUTEUR — Créer un examen (BROUILLON)
@@ -143,8 +132,8 @@ const addQuestion = async (req, res) => {
     );
     res.status(201).json({ ...question, reponses: repRes.rows });
   } catch (err) {
-    try { await client.query('ROLLBACK'); } catch (_) {}
-    console.error('DB error:', err);
+    await client.query('ROLLBACK');
+    console.error(err);
     res.status(500).json({ error: 'Erreur serveur' });
   } finally { client.release(); }
 };
@@ -188,8 +177,8 @@ const updateQuestion = async (req, res) => {
     );
     res.json({ ...qRes.rows[0], reponses: repRes.rows });
   } catch (err) {
-    try { await client.query('ROLLBACK'); } catch (_) {}
-    console.error('DB error:', err);
+    await client.query('ROLLBACK');
+    console.error(err);
     res.status(500).json({ error: 'Erreur serveur' });
   } finally { client.release(); }
 };
@@ -422,7 +411,7 @@ const getExamen = async (req, res) => {
     let questions = qRes.rows.map(q => {
       let reponses = Array.isArray(q.reponses) ? q.reponses.filter(r => r && r.id) : [];
       // Mélanger les réponses en JS
-      if (!isTuteur && (examen.melanger_reponses !== false)) {
+      if (!isTuteur && examen.melanger_reponses) {
         reponses = [...reponses].sort(() => Math.random() - 0.5);
       }
       return {
@@ -438,7 +427,7 @@ const getExamen = async (req, res) => {
     });
 
     // Mélanger les questions en JS si nécessaire
-    if (!isTuteur && (examen.melanger_questions !== false)) {
+    if (!isTuteur && examen.melanger_questions) {
       questions = [...questions].sort(() => Math.random() - 0.5);
     }
 
@@ -446,6 +435,56 @@ const getExamen = async (req, res) => {
     res.json({ ...examen, questions });
   } catch (err) {
     console.error('getExamen error:', err);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════
+// TUTEUR — Liste des tentatives pour un examen (avec notes étudiants)
+// GET /api/examens/:id/tentatives
+// ══════════════════════════════════════════════════════════════════
+const getTentativesExamen = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const exam = await pool.query(`SELECT * FROM examens WHERE id=$1`, [id]);
+    if (!exam.rows.length) return res.status(404).json({ error: 'Examen introuvable' });
+    if (String(exam.rows[0].tuteur_id) !== String(req.user.id) && req.user.role !== 'admin')
+      return res.status(403).json({ error: 'Non autorisé' });
+
+    const { rows } = await pool.query(
+      `SELECT t.id, t.statut, t.score_obtenu, t.pourcentage, t.started_at, t.submitted_at,
+              u.id as etudiant_id, u.prenom as etudiant_prenom, u.nom as etudiant_nom,
+              u.photo_profil as etudiant_photo
+       FROM tentatives_examen t
+       JOIN utilisateurs u ON t.etudiant_id=u.id
+       WHERE t.examen_id=$1
+       ORDER BY t.submitted_at DESC`,
+      [id]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════
+// ÉTUDIANT — Mes tentatives pour un examen (pour récupérer tentativeId)
+// GET /api/examens/:id/mes-tentatives
+// ══════════════════════════════════════════════════════════════════
+const getMesTentativesExamen = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { rows } = await pool.query(
+      `SELECT t.id, t.statut, t.score_obtenu, t.pourcentage, t.started_at, t.submitted_at
+       FROM tentatives_examen t
+       WHERE t.examen_id=$1 AND t.etudiant_id=$2
+       ORDER BY t.started_at DESC`,
+      [id, req.user.id]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 };
@@ -511,8 +550,8 @@ const demarrerTentative = async (req, res) => {
     await client.query('COMMIT');
     res.status(201).json({ tentative: tentRes.rows[0], examen, expiresAt });
   } catch (err) {
-    try { await client.query('ROLLBACK'); } catch (_) {}
-    console.error('DB error:', err);
+    await client.query('ROLLBACK');
+    console.error(err);
     res.status(500).json({ error: 'Erreur serveur' });
   } finally { client.release(); }
 };
@@ -523,18 +562,16 @@ const demarrerTentative = async (req, res) => {
 // ══════════════════════════════════════════════════════════════════
 const soumettreReponses = async (req, res) => {
   const { tentativeId } = req.params;
-  // Accepter { reponses: [...] } ou directement [...] 
-  let reponses = req.body?.reponses ?? req.body ?? [];
-  if (!Array.isArray(reponses)) reponses = [];
+  const { reponses = [] } = req.body; // [{ questionId, reponseId }]
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     const tentRes = await client.query(
       `SELECT t.*, e.note_passage, e.titre as examen_titre, e.salle_id,
+              e.date_affichage_resultats,
               s.nom as salle_nom,
-              u.prenom as tuteur_prenom, u.nom as tuteur_nom, u.email as tuteur_email,
-              NULL::timestamp as date_affichage_resultats
+              u.prenom as tuteur_prenom, u.nom as tuteur_nom, u.email as tuteur_email
        FROM tentatives_examen t
        JOIN examens e ON t.examen_id=e.id
        JOIN salles s ON e.salle_id=s.id
@@ -542,19 +579,6 @@ const soumettreReponses = async (req, res) => {
        WHERE t.id=$1 AND t.etudiant_id=$2`,
       [tentativeId, req.user.id]
     );
-    // Récupérer date_affichage_resultats séparément (colonne ajoutée par migration)
-    try {
-      const darRes = await client.query(
-        `SELECT date_affichage_resultats FROM examens WHERE id=$1`,
-        [tentRes.rows[0]?.examen_id]
-      );
-      if (darRes.rows.length && tentRes.rows.length) {
-        tentRes.rows[0].date_affichage_resultats = darRes.rows[0].date_affichage_resultats;
-      }
-    } catch (_) { /* colonne pas encore créée — résultats immédiats */ 
-      try { await client.query('ROLLBACK'); } catch (__) {}
-      await client.query('BEGIN');
-    }
     if (!tentRes.rows.length) return res.status(404).json({ error: 'Tentative introuvable.' });
     const tentative = tentRes.rows[0];
 
@@ -583,18 +607,11 @@ const soumettreReponses = async (req, res) => {
       const correct = repCorrecte.rows.length && repCorrecte.rows[0].est_correcte;
       if (correct) scoreObtenu += parseFloat(repCorrecte.rows[0].points);
 
-      // Vérifier si déjà inséré (évite l'erreur si pas de contrainte UNIQUE)
-      const existRes = await client.query(
-        `SELECT id FROM reponses_etudiant WHERE tentative_id=$1 AND question_id=$2 LIMIT 1`,
-        [tentativeId, rep.questionId]
+      await client.query(
+        `INSERT INTO reponses_etudiant (tentative_id, question_id, reponse_id, est_correcte)
+         VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
+        [tentativeId, rep.questionId, rep.reponseId, correct]
       );
-      if (!existRes.rows.length) {
-        await client.query(
-          `INSERT INTO reponses_etudiant (tentative_id, question_id, reponse_id, est_correcte)
-           VALUES ($1,$2,$3,$4)`,
-          [tentativeId, rep.questionId, rep.reponseId, correct]
-        );
-      }
     }
 
     const pourcentage = tentative.score_max > 0
@@ -611,7 +628,6 @@ const soumettreReponses = async (req, res) => {
 
     // ─── Certificat automatique si réussi ────────────────
     let certificat = null;
-    let _pdfOpts   = null;
     if (reussi) {
       const certExist = await client.query(
         `SELECT id FROM certificats WHERE etudiant_id=$1 AND examen_id=$2`,
@@ -623,57 +639,12 @@ const soumettreReponses = async (req, res) => {
         const year = new Date().getFullYear();
         const numeroCert = `CERT-${year}-${num}`;
 
-        // Récupérer infos étudiant + stats salle pour le PDF
-        const etudiantRes2 = await client.query(
-          `SELECT prenom, nom FROM utilisateurs WHERE id=$1`, [req.user.id]
-        );
-        const etudiant2 = etudiantRes2.rows[0] || {};
-
-        // Compter séances réalisées et durée totale de la salle
-        let nbSeances = 0, dureeTotaleMin = 0, matiere = '';
-        try {
-          const salleStats = await client.query(
-            `SELECT COUNT(*) as nb,
-                    COALESCE(SUM(duree_minutes),0) as duree
-             FROM seances
-             WHERE salle_id=$1 AND statut='REALISEE'`,
-            [tentative.salle_id]
-          );
-          nbSeances = parseInt(salleStats.rows[0]?.nb || 0);
-          dureeTotaleMin = parseInt(salleStats.rows[0]?.duree || 0);
-          const matiereRes = await client.query(
-            `SELECT matiere FROM salles WHERE id=$1`, [tentative.salle_id]
-          );
-          matiere = matiereRes.rows[0]?.matiere || '';
-        } catch (statErr) {
-          // Si la requête a cassé la tx, on la réinitialise proprement
-          try { await client.query('ROLLBACK'); } catch (_) {}
-          await client.query('BEGIN');
-        }
-
-        // Insérer le certificat SANS le PDF (PDF généré après COMMIT)
         const certRes = await client.query(
           `INSERT INTO certificats (etudiant_id, examen_id, tentative_id, numero_certificat, score_obtenu)
            VALUES ($1,$2,$3,$4,$5) RETURNING *`,
           [req.user.id, tentative.examen_id, tentativeId, numeroCert, pourcentage]
         );
         certificat = certRes.rows[0];
-        
-        // Stocker les infos pour générer le PDF après COMMIT (hors transaction)
-        _pdfOpts = {
-          certId: certificat.id,
-          numeroCert,
-          etudiantPrenom: etudiant2.prenom || '',
-          etudiantNom:    etudiant2.nom    || '',
-          examenTitre:    tentative.examen_titre,
-          salleNom:       tentative.salle_nom,
-          matiere,
-          tuteurNom:      `${tentative.tuteur_prenom} ${tentative.tuteur_nom}`,
-          scoreObtenu:    pourcentage,
-          nbSeances,
-          dureeTotaleMin,
-          dateEmission:   new Date(),
-        };
 
         // Emails
         const etudiantRes = await client.query(
@@ -681,9 +652,7 @@ const soumettreReponses = async (req, res) => {
         );
         const etudiant = etudiantRes.rows[0];
 
-        // Email envoyé APRÈS génération PDF (voir setImmediate plus bas)
-        // On stocke les infos email dans _pdfOpts pour l'envoyer avec le PDF joint
-        _pdfOpts._emailOpts = {
+        emailService.sendCertificatEmail({
           to: etudiant.email,
           nom: `${etudiant.prenom} ${etudiant.nom}`,
           examenTitre: tentative.examen_titre,
@@ -691,7 +660,7 @@ const soumettreReponses = async (req, res) => {
           numeroCert,
           score: pourcentage.toFixed(1),
           tuteurNom: `${tentative.tuteur_prenom} ${tentative.tuteur_nom}`,
-        };
+        }).catch(console.error);
 
         emailService.sendNotifTuteurCertificat({
           to: tentative.tuteur_email,
@@ -716,36 +685,6 @@ const soumettreReponses = async (req, res) => {
 
     await client.query('COMMIT');
 
-    // ─── Générer le PDF APRÈS COMMIT (hors transaction) ─────────────
-    if (_pdfOpts && genererCertificatPDF) {
-      setImmediate(async () => {
-        try {
-          const urlPdf = await genererCertificatPDF(_pdfOpts);
-          await pool.query(
-            `UPDATE certificats SET url_pdf=$1 WHERE id=$2`,
-            [urlPdf, _pdfOpts.certId]
-          );
-          if (certificat) certificat.url_pdf = urlPdf;
-
-          // Envoyer l'email AVEC le PDF en pièce jointe maintenant qu'il est généré
-          if (_pdfOpts._emailOpts) {
-            const certService = require('../services/certificat.service');
-            const pdfFilePath = certService.getCertificatFilePath(_pdfOpts.numeroCert);
-            emailService.sendCertificatEmail({
-              ..._pdfOpts._emailOpts,
-              pdfPath: pdfFilePath,
-            }).catch(console.error);
-          }
-        } catch (pdfErr) {
-          console.error('PDF certificat error (post-commit):', pdfErr.message);
-          // Envoyer l'email sans PDF en fallback
-          if (_pdfOpts._emailOpts) {
-            emailService.sendCertificatEmail(_pdfOpts._emailOpts).catch(console.error);
-          }
-        }
-      });
-    }
-
     // Déterminer si les résultats sont affichables maintenant
     const maintenant = new Date();
     const dateAffichage = tentative.date_affichage_resultats
@@ -764,8 +703,8 @@ const soumettreReponses = async (req, res) => {
       dateAffichageResultats: tentative.date_affichage_resultats,
     });
   } catch (err) {
-    try { await client.query('ROLLBACK'); } catch (_) {}
-    console.error('DB error:', err);
+    await client.query('ROLLBACK');
+    console.error(err);
     res.status(500).json({ error: 'Erreur serveur' });
   } finally { client.release(); }
 };
@@ -778,24 +717,13 @@ const getResultatsTentative = async (req, res) => {
   const { tentativeId } = req.params;
   try {
     const tentRes = await pool.query(
-      `SELECT t.*, e.titre as examen_titre,
-              e.note_passage, e.duree_minutes,
-              NULL::timestamp as date_affichage_resultats
+      `SELECT t.*, e.titre as examen_titre, e.date_affichage_resultats,
+              e.note_passage, e.duree_minutes
        FROM tentatives_examen t
        JOIN examens e ON t.examen_id=e.id
        WHERE t.id=$1 AND t.etudiant_id=$2`,
       [tentativeId, req.user.id]
     );
-    // Récupérer date_affichage_resultats séparément (colonne ajoutée par migration)
-    if (tentRes.rows.length) {
-      try {
-        const darRes = await pool.query(
-          `SELECT date_affichage_resultats FROM examens WHERE id=$1`,
-          [tentRes.rows[0].examen_id]
-        );
-        if (darRes.rows.length) tentRes.rows[0].date_affichage_resultats = darRes.rows[0].date_affichage_resultats;
-      } catch (_) { /* colonne pas encore créée */ }
-    }
     if (!tentRes.rows.length)
       return res.status(404).json({ error: 'Tentative introuvable.' });
 
@@ -909,195 +837,12 @@ const revoquerCertificat = async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Erreur serveur' }); }
 };
 
-
-// ══════════════════════════════════════════════════════════════════
-// Résultats détaillés d'une tentative
-// GET /api/tentatives/:tentativeId/resultats
-// ══════════════════════════════════════════════════════════════════
-// ══════════════════════════════════════════════════════════════════
-// TUTEUR — Statistiques complètes d'un examen
-// GET /api/examens/:id/stats
-// ══════════════════════════════════════════════════════════════════
-const getStatsExamen = async (req, res) => {
-  const { id } = req.params;
-  try {
-    // Vérifier que c'est bien le tuteur
-    const examRes = await pool.query(
-      `SELECT e.*, s.nom as salle_nom,
-              u.prenom as tuteur_prenom, u.nom as tuteur_nom
-       FROM examens e
-       JOIN salles s ON e.salle_id=s.id
-       JOIN utilisateurs u ON e.tuteur_id=u.id
-       WHERE e.id=$1`, [id]
-    );
-    if (!examRes.rows.length) return res.status(404).json({ error: 'Examen introuvable' });
-    const examen = examRes.rows[0];
-    if (String(examen.tuteur_id) !== String(req.user.id) && req.user.role !== 'admin')
-      return res.status(403).json({ error: 'Non autorisé' });
-
-    // Colonnes optionnelles (migration)
-    let dateDebut = null, dateLimite = null, dateAffichage = null, modeAffichage = 'UNE_PAR_UNE';
-    try {
-      const extraRes = await pool.query(
-        `SELECT date_debut, date_limite, date_affichage_resultats, mode_affichage
-         FROM examens WHERE id=$1`, [id]
-      );
-      if (extraRes.rows.length) {
-        dateDebut = extraRes.rows[0].date_debut;
-        dateLimite = extraRes.rows[0].date_limite;
-        dateAffichage = extraRes.rows[0].date_affichage_resultats;
-        modeAffichage = extraRes.rows[0].mode_affichage || 'UNE_PAR_UNE';
-      }
-    } catch (_) {}
-
-    // Questions avec réponses (avec est_correcte pour le tuteur)
-    const qRes = await pool.query(
-      `SELECT q.*,
-              COALESCE(
-                json_agg(
-                  json_build_object('id', r.id, 'texte', r.texte, 'ordre', r.ordre, 'est_correcte', r.est_correcte)
-                  ORDER BY r.ordre
-                ) FILTER (WHERE r.id IS NOT NULL),
-                '[]'
-              ) as reponses
-       FROM questions_examen q
-       LEFT JOIN reponses_question r ON r.question_id=q.id
-       WHERE q.examen_id=$1
-       GROUP BY q.id ORDER BY q.ordre`, [id]
-    );
-
-    // Tentatives de tous les étudiants
-    const tentRes = await pool.query(
-      `SELECT t.*,
-              u.prenom as etudiant_prenom, u.nom as etudiant_nom, u.email as etudiant_email
-       FROM tentatives_examen t
-       JOIN utilisateurs u ON t.etudiant_id=u.id
-       WHERE t.examen_id=$1
-       ORDER BY t.started_at DESC`, [id]
-    );
-
-    // Stats globales
-    const terminees = tentRes.rows.filter(t => t.statut !== 'EN_COURS');
-    const reussies  = tentRes.rows.filter(t => t.statut === 'REUSSI');
-    const scores    = terminees.map(t => parseFloat(t.pourcentage)).filter(s => !isNaN(s));
-    const moyenneScore = scores.length ? (scores.reduce((a,b) => a+b, 0) / scores.length).toFixed(1) : null;
-
-    res.json({
-      examen: {
-        ...examen,
-        date_debut: dateDebut,
-        date_limite: dateLimite,
-        date_affichage_resultats: dateAffichage,
-        mode_affichage: modeAffichage,
-      },
-      questions: qRes.rows,
-      tentatives: tentRes.rows,
-      stats: {
-        total: tentRes.rows.length,
-        terminees: terminees.length,
-        reussies: reussies.length,
-        echecs: terminees.length - reussies.length,
-        tauxReussite: terminees.length ? ((reussies.length / terminees.length) * 100).toFixed(0) : null,
-        moyenneScore,
-      },
-    });
-  } catch (err) {
-    console.error('getStatsExamen error:', err);
-    res.status(500).json({ error: 'Erreur serveur' });
-  }
-};
-
-// ══════════════════════════════════════════════════════════════════
-// ÉTUDIANT — Dernière tentative d'un examen (pour voir résultats)
-// GET /api/examens/:id/ma-derniere-tentative
-// ══════════════════════════════════════════════════════════════════
-const getMaDerniereTentative = async (req, res) => {
-  const { id } = req.params;
-  try {
-    const tentRes = await pool.query(
-      `SELECT t.* FROM tentatives_examen t
-       WHERE t.examen_id=$1 AND t.etudiant_id=$2
-       ORDER BY t.started_at DESC LIMIT 1`,
-      [id, req.user.id]
-    );
-    if (!tentRes.rows.length)
-      return res.status(404).json({ error: 'Aucune tentative trouvée.' });
-    res.json({ tentativeId: tentRes.rows[0].id, tentative: tentRes.rows[0] });
-  } catch (err) {
-    res.status(500).json({ error: 'Erreur serveur' });
-  }
-};
-
 module.exports = {
   createExamen, updateExamen,
   addQuestion, updateQuestion, deleteQuestion,
   publierExamen, archiverExamen,
   getExamensSalle, getMesExamens, getMesExamensEtudiant, getExamen,
+  getTentativesExamen, getMesTentativesExamen,
   demarrerTentative, soumettreReponses, getResultatsTentative,
-  getStatsExamen, getMaDerniereTentative,
-  mesCertificats, verifierCertificat, revoquerCertificat, telechargerCertificat,
+  mesCertificats, verifierCertificat, revoquerCertificat,
 };
-
-// ══════════════════════════════════════════════════════════════════
-// Téléchargement PDF d'un certificat
-// GET /api/certificats/telecharger/:numero
-// ══════════════════════════════════════════════════════════════════
-async function telechargerCertificat(req, res) {
-  const { numero } = req.params;
-  try {
-    const fs = require('fs');
-    const certService = require('../services/certificat.service');
-
-    // Vérifier appartenance
-    const { rows } = await pool.query(
-      `SELECT c.*,
-              u.prenom as etudiant_prenom, u.nom as etudiant_nom,
-              e.titre as examen_titre,
-              s.nom as salle_nom, s.matiere,
-              tu.prenom as tuteur_prenom, tu.nom as tuteur_nom
-       FROM certificats c
-       JOIN utilisateurs u  ON c.etudiant_id = u.id
-       JOIN examens e       ON c.examen_id   = e.id
-       JOIN salles s        ON e.salle_id    = s.id
-       JOIN utilisateurs tu ON e.tuteur_id   = tu.id
-       WHERE c.numero_certificat = $1`, [numero]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Certificat introuvable.' });
-    const info = rows[0];
-
-    if (req.user.role !== 'admin' && String(info.etudiant_id) !== String(req.user.id)) {
-      return res.status(403).json({ error: 'Accès non autorisé.' });
-    }
-
-    // ── Supprimer l'ancien PDF pour forcer la régénération avec le nouveau design ──
-    const pdfPath = certService.getCertificatFilePath(numero);
-    if (fs.existsSync(pdfPath)) {
-      fs.unlinkSync(pdfPath);
-    }
-
-    // ── Toujours régénérer avec le service actuel ──
-    await certService.genererCertificatPDF({
-      certId:         info.id,
-      numeroCert:     numero,
-      etudiantPrenom: info.etudiant_prenom,
-      etudiantNom:    info.etudiant_nom,
-      examenTitre:    info.examen_titre,
-      salleNom:       info.salle_nom      || '',
-      matiere:        info.matiere        || '',
-      tuteurNom:      `${info.tuteur_prenom} ${info.tuteur_nom}`,
-      scoreObtenu:    info.score_obtenu,
-      dateEmission:   info.date_emission,
-    });
-
-    if (!fs.existsSync(pdfPath)) {
-      return res.status(500).json({ error: 'Erreur lors de la génération du PDF.' });
-    }
-
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="Certificat-SmartEdu-${numero}.pdf"`);
-    fs.createReadStream(pdfPath).pipe(res);
-  } catch (err) {
-    console.error('telechargerCertificat error:', err);
-    res.status(500).json({ error: 'Erreur serveur' });
-  }
-}
