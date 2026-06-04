@@ -120,7 +120,7 @@ function drawElegantBorder(doc, W, H) {
 
 // ─── DESSINER UNE MÉDAILLE/HONNEUR ─────────────────────────────────
 function drawHonorMedal(doc, cx, cy) {
-  const radius = 38;
+  const radius = 65;
   
   // Rayons dorés autour de la médaille (effet soleil)
   for (let i = 0; i < 24; i++) {
@@ -138,11 +138,25 @@ function drawHonorMedal(doc, cx, cy) {
   doc.circle(cx, cy, radius).lineWidth(1.5).strokeColor(C.goldDark).stroke();
   doc.circle(cx, cy, radius - 3).lineWidth(1).strokeColor(C.goldLight).stroke();
   
-  // Fond de la médaille (dégradé simulé - blanc/ivoire)
+  // Fond de la médaille blanc
   doc.circle(cx, cy, radius - 5).fill(C.white);
-  
-  // Cœur ou étoile centrale
-  doc.fontSize(28).fillColor(C.gold).text('★', cx - 14, cy - 14, { width: 28, align: 'center' });
+
+  // Logo SmartEdu clippé dans le cercle central
+  if (LOGO_PATH) {
+    try {
+      const logoSize = radius * 2;
+      doc.save();
+      doc.circle(cx, cy, radius).clip();
+      doc.image(LOGO_PATH, cx - logoSize / 2, cy - logoSize / 2, {
+        width: logoSize, height: logoSize, fit: [logoSize, logoSize],
+      });
+      doc.restore();
+    } catch (_) {
+      doc.fontSize(28).fillColor(C.gold).text('\u2605', cx - 14, cy - 14, { width: 28, align: 'center' });
+    }
+  } else {
+    doc.fontSize(28).fillColor(C.gold).text('\u2605', cx - 14, cy - 14, { width: 28, align: 'center' });
+  }
   
   // Ruban bleu SmartEdu
   doc.save();
@@ -308,12 +322,7 @@ async function genererCertificatPDF(opts) {
          });
     }
 
-    // Date
-    doc.font('Helvetica').fontSize(9.5)
-       .fillColor(C.gray)
-       .text(dateDisplay, 0, bodyY + 68, {
-         width: W, align: 'center',
-       });
+    // Date — déplacée sous la médaille
 
     // ─────────────────────────────────────────────────────────────
     // 10. MÉDAILLE D'HONNEUR + SCORE
@@ -324,12 +333,19 @@ async function genererCertificatPDF(opts) {
     // Score affiché sous la médaille
     doc.font('Helvetica-Bold').fontSize(11)
        .fillColor(C.goldDark)
-       .text(`${scoreDisplay}%`, CX - 25, medalY + 48, {
+       .text(`${scoreDisplay}%`, CX - 25, medalY + 70, {
          width: 50, align: 'center',
        });
     doc.font('Helvetica').fontSize(8).fillColor(C.gray)
-       .text('SCORE', CX - 20, medalY + 62, {
+       .text('SCORE', CX - 20, medalY + 82, {
          width: 40, align: 'center',
+       });
+
+    // Date — bien visible sous le badge, en dehors du cercle
+    doc.font('Helvetica-Bold').fontSize(10)
+       .fillColor(C.blueDeep)
+       .text(dateDisplay, CX - 100, medalY + 100, {
+         width: 200, align: 'center',
        });
 
     // ─────────────────────────────────────────────────────────────

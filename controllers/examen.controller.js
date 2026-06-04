@@ -837,6 +837,71 @@ const revoquerCertificat = async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Erreur serveur' }); }
 };
 
+// ══════════════════════════════════════════════════════════════════
+// Téléchargement PDF d'un certificat (toujours régénéré)
+// GET /api/certificats/telecharger/:numero
+// ══════════════════════════════════════════════════════════════════
+const telechargerCertificat = async (req, res) => {
+  const { numero } = req.params;
+  try {
+    const fs          = require('fs');
+    const certService = require('../services/certificat.service');
+
+    // Récupérer toutes les infos du certificat
+    const { rows } = await pool.query(
+      `SELECT c.*,
+              u.prenom  as etudiant_prenom, u.nom  as etudiant_nom,
+              e.titre   as examen_titre,
+              s.nom     as salle_nom,       s.matiere,
+              tu.prenom as tuteur_prenom,   tu.nom as tuteur_nom
+       FROM certificats c
+       JOIN utilisateurs u  ON c.etudiant_id = u.id
+       JOIN examens e        ON c.examen_id   = e.id
+       JOIN salles s         ON e.salle_id    = s.id
+       JOIN utilisateurs tu  ON e.tuteur_id   = tu.id
+       WHERE c.numero_certificat = $1`, [numero]
+    );
+
+    if (!rows.length)
+      return res.status(404).json({ error: 'Certificat introuvable.' });
+
+    const info = rows[0];
+
+    // Vérifier que l'étudiant connecté est bien le propriétaire (ou admin)
+    if (req.user.role !== 'admin' && String(info.etudiant_id) !== String(req.user.id))
+      return res.status(403).json({ error: 'Accès non autorisé.' });
+
+    // Supprimer l'ancien PDF pour forcer la régénération avec le design actuel
+    const pdfPath = certService.getCertificatFilePath(numero);
+    if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath);
+
+    // Générer le PDF avec le service actuel
+    await certService.genererCertificatPDF({
+      certId:         info.id,
+      numeroCert:     numero,
+      etudiantPrenom: info.etudiant_prenom,
+      etudiantNom:    info.etudiant_nom,
+      examenTitre:    info.examen_titre,
+      salleNom:       info.salle_nom   || '',
+      matiere:        info.matiere     || '',
+      tuteurNom:      `${info.tuteur_prenom} ${info.tuteur_nom}`,
+      scoreObtenu:    info.score_obtenu,
+      dateEmission:   info.date_emission,
+    });
+
+    if (!fs.existsSync(pdfPath))
+      return res.status(500).json({ error: 'Erreur lors de la génération du PDF.' });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="Certificat-SmartEdu-${numero}.pdf"`);
+    fs.createReadStream(pdfPath).pipe(res);
+
+  } catch (err) {
+    console.error('telechargerCertificat error:', err.message);
+    res.status(500).json({ error: 'Erreur serveur lors du téléchargement.' });
+  }
+};
+
 module.exports = {
   createExamen, updateExamen,
   addQuestion, updateQuestion, deleteQuestion,
@@ -844,5 +909,5 @@ module.exports = {
   getExamensSalle, getMesExamens, getMesExamensEtudiant, getExamen,
   getTentativesExamen, getMesTentativesExamen,
   demarrerTentative, soumettreReponses, getResultatsTentative,
-  mesCertificats, verifierCertificat, revoquerCertificat,
+  mesCertificats, verifierCertificat, revoquerCertificat, telechargerCertificat,
 };

@@ -122,4 +122,5 @@ router.get ('/tentatives/:tentativeId/resultats',authenticate, examenCtrl.getRes
 // Certificats
 router.get('/certificats/mes-certificats',       authenticate, examenCtrl.mesCertificats);
 router.get('/certificats/verifier/:numero',      examenCtrl.verifierCertificat); // public
+router.get('/certificats/telecharger/:numero',   authenticate, examenCtrl.telechargerCertificat);
 router.put('/admin/certificats/:id/revoquer',    authenticate, requireRole('admin'), examenCtrl.revoquerCertificat);
