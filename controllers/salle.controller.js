@@ -207,46 +207,79 @@ const rejoindreSalle = async (req, res) => {
   }
 };
 
-// POST /api/salles/:id/demander-invitation
+// POST /api/salles/:id/demander
+// Utilisé par étudiant ET tuteur pour demander à rejoindre une salle
 const demanderInvitation = async (req, res) => {
   try {
     const { id } = req.params;
+
     const salle = await pool.query('SELECT * FROM salles WHERE id=$1', [id]);
     if (!salle.rows.length) return res.status(404).json({ error: 'Salle introuvable' });
-    // Salle publique ou privée : l'étudiant envoie une demande à l'admin
-    // (pour les salles publiques, on ne rejoint plus directement, on demande aussi)
 
     // Vérifier si déjà membre
     const deja = await pool.query(
       'SELECT id FROM participations WHERE utilisateur_id=$1 AND salle_id=$2',
       [req.user.id, id]
     );
-    if (deja.rows.length) return res.status(409).json({ error: 'Vous êtes déjà membre.' });
+    if (deja.rows.length) return res.status(409).json({ error: 'Vous êtes déjà membre de cette salle.' });
 
-    // Vérifier si une demande existe déjà
+    // Récupérer l'admin de la salle — chercher d'abord dans participations, sinon via createur_id
+    let adminId = null
+
+    const adminSalle = await pool.query(
+      `SELECT utilisateur_id FROM participations
+       WHERE salle_id=$1 AND role='ADMIN'
+       LIMIT 1`,
+      [id]
+    );
+
+    if (adminSalle.rows.length) {
+      adminId = adminSalle.rows[0].utilisateur_id;
+    } else {
+      // Fallback : utiliser le createur_id de la salle
+      const creator = await pool.query(
+        `SELECT createur_id FROM salles WHERE id=$1`, [id]
+      );
+      if (creator.rows.length && creator.rows[0].createur_id) {
+        adminId = creator.rows[0].createur_id;
+        // Réparer la participation manquante
+        await pool.query(
+          `INSERT INTO participations (utilisateur_id, salle_id, role)
+           VALUES ($1, $2, 'ADMIN')
+           ON CONFLICT (utilisateur_id, salle_id) DO UPDATE SET role='ADMIN'`,
+          [adminId, id]
+        );
+      }
+    }
+
+    if (!adminId) return res.status(404).json({ error: 'Admin de la salle introuvable' });
+
+    // Déterminer le type selon le rôle de l'utilisateur
+    // - Tuteur qui demande → type VERS_TUTEUR (l'admin doit accepter = tuteur rejoint comme CO_ADMIN)
+    // - Étudiant qui demande → type VERS_ETUDIANT (l'admin doit accepter = étudiant rejoint comme MEMBRE)
+    const typeInvitation = req.user.role === 'tuteur' ? 'VERS_TUTEUR' : 'VERS_ETUDIANT';
+
+    // Vérifier si une demande EN_ATTENTE existe déjà (expediteur = demandeur)
     const existing = await pool.query(
-      `SELECT id FROM invitations WHERE salle_id=$1 AND destinataire_id=$2 AND statut='EN_ATTENTE'`,
+      `SELECT id FROM invitations
+       WHERE salle_id=$1 AND expediteur_id=$2 AND statut='EN_ATTENTE'`,
       [id, req.user.id]
     );
     if (existing.rows.length) {
-      return res.status(409).json({ error: 'Demande déjà envoyée, en attente de l\'admin.' });
+      return res.status(409).json({ error: 'Demande déjà envoyée, en attente de validation par l\'admin.' });
     }
-
-    // Créer une invitation de type VERS_ETUDIANT (l'étudiant demande à l'admin)
-    // L'expediteur est l'étudiant, le destinataire est l'admin de la salle
-    const adminSalle = await pool.query(
-      `SELECT utilisateur_id FROM participations WHERE salle_id=$1 AND role='ADMIN'`,
-      [id]
-    );
-    if (!adminSalle.rows.length) return res.status(404).json({ error: 'Admin de la salle introuvable' });
 
     await pool.query(
       `INSERT INTO invitations (salle_id, expediteur_id, destinataire_id, type_invitation)
-       VALUES ($1,$2,$3,'VERS_ETUDIANT')`,
-      [id, req.user.id, adminSalle.rows[0].utilisateur_id]
+       VALUES ($1, $2, $3, $4)`,
+      [id, req.user.id, adminId, typeInvitation]
     );
 
-    res.json({ message: 'Demande d\'invitation envoyée à l\'admin de la salle.' });
+    const msg = req.user.role === 'tuteur'
+      ? 'Demande d\'enseignement envoyée à l\'admin de la salle.'
+      : 'Demande d\'invitation envoyée à l\'admin de la salle.';
+
+    res.json({ message: msg });
   } catch (err) {
     console.error('demanderInvitation error:', err);
     res.status(500).json({ error: 'Erreur serveur' });

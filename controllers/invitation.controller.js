@@ -110,11 +110,32 @@ const accepterInvitation = async (req, res) => {
           [ancienTuteur.rows[0].utilisateur_id, invitation.salle_id]
         );
       }
-      // Ajouter le nouveau tuteur comme CO_ADMIN
+
+      // CAS 1 : Admin a invité le tuteur
+      //   expediteur=admin, destinataire=tuteur
+      //   Le TUTEUR clique "accepter" → req.user = tuteur = destinataire_id
+      //   → tuteurId = destinataire_id = req.user.id
+      //
+      // CAS 2 : Tuteur a demandé à rejoindre
+      //   expediteur=tuteur, destinataire=admin
+      //   L'ADMIN clique "accepter" → req.user = admin = destinataire_id
+      //   → tuteurId = expediteur_id (le tuteur qui a demandé)
+      //
+      // RÈGLE : le tuteur est toujours celui dont le role plateforme = 'tuteur'
+      // On vérifie directement qui est le tuteur entre expediteur et destinataire
+      const tuteurRes = await client.query(
+        `SELECT id FROM utilisateurs WHERE id IN ($1, $2) AND role='tuteur' LIMIT 1`,
+        [invitation.expediteur_id, invitation.destinataire_id]
+      );
+      const tuteurId = tuteurRes.rows.length
+        ? tuteurRes.rows[0].id
+        : req.user.id; // fallback
+
+      // Ajouter LE TUTEUR comme CO_ADMIN (jamais l'admin)
       await client.query(
         `INSERT INTO participations (utilisateur_id, salle_id, role) VALUES ($1, $2, 'CO_ADMIN')
          ON CONFLICT (utilisateur_id, salle_id) DO UPDATE SET role='CO_ADMIN'`,
-        [req.user.id, invitation.salle_id]
+        [tuteurId, invitation.salle_id]
       );
       await client.query(
         `UPDATE salles SET statut='ACTIVE_AVEC_TUTEUR' WHERE id=$1`, [invitation.salle_id]
