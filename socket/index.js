@@ -499,11 +499,34 @@ const setupSocket = (io) => {
     });
 
     // ─── DISCONNECT ───────────────────────────────────────
-    socket.on('disconnect', () => {
+    socket.on('disconnect', async () => {
       if (socket.salleId) {
         io.to(`salle:${socket.salleId}`).emit('salle:user-left', { userId: socket.user.id });
       }
       console.log(`🔌 User ${socket.user.id} disconnected`);
+
+      // Si cet utilisateur était l'initiateur d'un appel actif → clôturer l'appel
+      try {
+        const activeCall = await pool.query(
+          `SELECT id, salle_id FROM sessions_appel
+           WHERE initiateur_id = $1 AND actif = TRUE AND date_fin IS NULL
+           LIMIT 1`,
+          [socket.user.id]
+        );
+        if (activeCall.rows.length > 0) {
+          const sess = activeCall.rows[0];
+          await pool.query(
+            `UPDATE sessions_appel SET actif=FALSE, date_fin=NOW()
+             WHERE id=$1`,
+            [sess.id]
+          );
+          // Notifier tous les participants que l'appel est terminé
+          io.to(`salle:${sess.salle_id}`).emit('call:ended', { sessionId: sess.id });
+          console.log(`📵 Appel ${sess.id} clôturé automatiquement (initiateur déconnecté)`);
+        }
+      } catch (err) {
+        console.error('auto-close call on disconnect error:', err);
+      }
     });
   });
 };
