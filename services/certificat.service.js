@@ -142,21 +142,22 @@ function drawHonorMedal(doc, cx, cy) {
   doc.circle(cx, cy, radius - 5).fill(C.white);
 
   // Logo SmartEdu clippé dans le cercle central
-  if (LOGO_PATH) {
-    try {
-      const logoSize = radius * 2;
-      doc.save();
-      doc.circle(cx, cy, radius).clip();
-      doc.image(LOGO_PATH, cx - logoSize / 2, cy - logoSize / 2, {
-        width: logoSize, height: logoSize, fit: [logoSize, logoSize],
-      });
-      doc.restore();
-    } catch (_) {
-      doc.fontSize(28).fillColor(C.gold).text('\u2605', cx - 14, cy - 14, { width: 28, align: 'center' });
-    }
-  } else {
-    doc.fontSize(28).fillColor(C.gold).text('\u2605', cx - 14, cy - 14, { width: 28, align: 'center' });
+  // Logo SmartEdu clippé dans le cercle central - VERSION GRAND
+if (LOGO_PATH) {
+  try {
+    const logoSize = (radius - 2) * 3;  // Légèrement plus petit que le cercle
+    doc.save();
+    doc.circle(cx, cy, radius - 2).clip();  // Clip plus serré
+    doc.image(LOGO_PATH, cx - logoSize / 2, cy - logoSize / 2, {
+      width: logoSize,
+      height: logoSize,
+      // Supprimer 'fit' pour que l'image prenne toute la place
+    });
+    doc.restore();
+  } catch (_) {
+    doc.fontSize(28).fillColor(C.gold).text('★', cx - 14, cy - 14, { width: 28, align: 'center' });
   }
+}
   
   // Ruban bleu SmartEdu
   doc.save();
@@ -314,13 +315,13 @@ async function genererCertificatPDF(opts) {
          width: W, align: 'center',
        });
     
-    if (matiere) {
-      doc.font('Times-Italic').fontSize(11)
-         .fillColor(C.gray)
-         .text(`${matiere} • ${salleNom || ''}`, 0, bodyY + 44, {
-           width: W, align: 'center',
-         });
-    }
+    // if (matiere) {
+    //   doc.font('Times-Italic').fontSize(11)
+    //      .fillColor(C.gray)
+    //      .text(`${matiere} • ${salleNom || ''}`, 0, bodyY + 44, {
+    //        width: W, align: 'center',
+    //      });
+    // }
 
     // Date — déplacée sous la médaille
 
@@ -331,15 +332,15 @@ async function genererCertificatPDF(opts) {
     drawHonorMedal(doc, CX, medalY);
     
     // Score affiché sous la médaille
-    doc.font('Helvetica-Bold').fontSize(11)
-       .fillColor(C.goldDark)
-       .text(`${scoreDisplay}%`, CX - 25, medalY + 70, {
-         width: 50, align: 'center',
-       });
-    doc.font('Helvetica').fontSize(8).fillColor(C.gray)
-       .text('SCORE', CX - 20, medalY + 82, {
-         width: 40, align: 'center',
-       });
+    // doc.font('Helvetica-Bold').fontSize(11)
+    //    .fillColor(C.goldDark)
+    //    .text(`${scoreDisplay}%`, CX - 25, medalY + 70, {
+    //      width: 50, align: 'center',
+    //    });
+    // doc.font('Helvetica').fontSize(8).fillColor(C.gray)
+    //    .text('SCORE', CX - 20, medalY + 82, {
+    //      width: 40, align: 'center',
+    //    });
 
     // Date — bien visible sous le badge, en dehors du cercle
     doc.font('Helvetica-Bold').fontSize(10)
@@ -376,8 +377,8 @@ async function genererCertificatPDF(opts) {
     // ─────────────────────────────────────────────────────────────
     // 12. SCEAU / QR CODE SIMULÉ (élégance)
     // ─────────────────────────────────────────────────────────────
-    doc.circle(W - 65, H - 50, 15).lineWidth(1).strokeColor(C.gold).stroke();
-    doc.fontSize(10).fillColor(C.gold).text('✓', W - 70, H - 55);
+    // doc.circle(W - 65, H - 50, 15).lineWidth(1).strokeColor(C.gold).stroke();
+    // doc.fontSize(10).fillColor(C.gold).text('✓', W - 70, H - 55);
 
     // ─────────────────────────────────────────────────────────────
     // 13. RÉFÉRENCE EN BAS

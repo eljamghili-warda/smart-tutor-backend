@@ -6,6 +6,7 @@ const getStats = async (req, res) => {
   try {
     const [users, salles, seances, tuteursPending, finances, seancesParStatut] = await Promise.all([
 
+      
       // Utilisateurs
       pool.query(`
         SELECT
