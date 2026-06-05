@@ -522,6 +522,13 @@ ALTER TABLE certificats
 CREATE INDEX IF NOT EXISTS idx_examens_date_debut  ON examens(date_debut);
 CREATE INDEX IF NOT EXISTS idx_examens_date_limite ON examens(date_limite);
 CREATE INDEX IF NOT EXISTS idx_tentatives_statut2  ON tentatives_examen(etudiant_id, statut);
+-- Migration: ajouter date_specifique sur disponibilites_tuteur
+ALTER TABLE disponibilites_tuteur
+  ADD COLUMN IF NOT EXISTS date_specifique DATE;
+
+-- Index pour les requêtes par date
+CREATE INDEX IF NOT EXISTS idx_dispos_date ON disponibilites_tuteur(date_specifique);
+CREATE INDEX IF NOT EXISTS idx_dispos_tuteur_date ON disponibilites_tuteur(tuteur_id, date_specifique);
 
 -- Admin account initial
 INSERT INTO utilisateurs (prenom, nom, email, mot_de_passe, role)

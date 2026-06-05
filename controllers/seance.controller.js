@@ -26,24 +26,54 @@ const getSeances = async (req, res) => {
 };
 
 // ── GET /api/seances/emploi-du-temps ────────────────────────────────────────
+// ── GET /api/seances/emploi-du-temps ────────────────────────────────────────
 const getEmploiDuTemps = async (req, res) => {
   try {
     const { debut, fin } = req.query;
-    const result = await pool.query(`
-      SELECT s.*, sa.nom as salle_nom, u.prenom || ' ' || u.nom as tuteur_nom
+
+    // 1. Séances (avec PLANIFIEE ajouté)
+    const seancesRes = await pool.query(`
+      SELECT s.*, sa.nom as salle_nom, u.prenom || ' ' || u.nom as tuteur_nom,
+             'seance' as type_evenement
       FROM seances s
       JOIN salles sa ON s.salle_id = sa.id
       LEFT JOIN utilisateurs u ON s.tuteur_id = u.id
       WHERE s.salle_id IN (
         SELECT salle_id FROM participations WHERE utilisateur_id=$1
       )
-      AND s.statut IN ('EN_ATTENTE_PAIEMENT','CONFIRMEE','EN_COURS','REALISEE','ANNULEE')
+      AND s.statut IN ('EN_ATTENTE_PAIEMENT','PLANIFIEE','CONFIRMEE','EN_COURS','REALISEE','ANNULEE')
       AND ($2::timestamp IS NULL OR s.date_debut >= $2::timestamp)
       AND ($3::timestamp IS NULL OR s.date_debut <= $3::timestamp)
       ORDER BY s.date_debut
     `, [req.user.id, debut || null, fin || null]);
-    res.json(result.rows);
+
+    // 2. Examens publiés avec date_debut
+    const examensRes = await pool.query(`
+      SELECT e.id, e.titre, e.date_debut, e.date_limite as date_fin,
+             e.duree_minutes as duree, e.statut,
+             sa.nom as salle_nom,
+             u.prenom || ' ' || u.nom as tuteur_nom,
+             e.salle_id,
+             'examen' as type_evenement
+      FROM examens e
+      JOIN salles sa ON e.salle_id = sa.id
+      JOIN utilisateurs u ON e.tuteur_id = u.id
+      WHERE e.salle_id IN (
+        SELECT salle_id FROM participations WHERE utilisateur_id=$1
+      )
+      AND e.statut IN ('PUBLIE','ARCHIVE')
+      AND e.date_debut IS NOT NULL
+      AND ($2::timestamp IS NULL OR e.date_debut >= $2::timestamp)
+      AND ($3::timestamp IS NULL OR e.date_debut <= $3::timestamp)
+      ORDER BY e.date_debut
+    `, [req.user.id, debut || null, fin || null]);
+
+    res.json({
+      seances: seancesRes.rows,
+      examens: examensRes.rows,
+    });
   } catch (err) {
+    console.error('getEmploiDuTemps error:', err);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 };
@@ -304,7 +334,7 @@ const getDisponibilites = async (req, res) => {
   try {
     const { tuteurId } = req.query;
     const result = await pool.query(
-      `SELECT * FROM disponibilites_tuteur WHERE tuteur_id=$1 ORDER BY jour_semaine, heure_debut`,
+      `SELECT * FROM disponibilites_tuteur WHERE tuteur_id=$1 ORDER BY date_specifique NULLS LAST, heure_debut`,
       [tuteurId || req.user.id]
     );
     res.json(result.rows);
@@ -316,21 +346,35 @@ const getDisponibilites = async (req, res) => {
 // ── POST /api/seances/disponibilites ─────────────────────────────────────────
 const setDisponibilite = async (req, res) => {
   try {
-    const { jourSemaine, heureDebut, heureFin } = req.body;
-    if (!jourSemaine || !heureDebut || !heureFin)
-      return res.status(400).json({ error: 'jourSemaine, heureDebut, heureFin requis' });
-    if (parseInt(jourSemaine) < 1 || parseInt(jourSemaine) > 7)
-      return res.status(400).json({ error: 'jourSemaine : 1=Lundi … 7=Dimanche' });
+    const { dateSpecifique, heureDebut, heureFin } = req.body;
+    if (!dateSpecifique || !heureDebut || !heureFin)
+      return res.status(400).json({ error: 'dateSpecifique, heureDebut, heureFin requis' });
     if (heureDebut >= heureFin)
       return res.status(400).json({ error: 'heureFin doit être après heureDebut' });
 
+    // Calculer le jour de la semaine depuis la date (1=Lundi ... 7=Dimanche)
+    const d = new Date(dateSpecifique);
+    const jourSemaine = d.getDay() === 0 ? 7 : d.getDay(); // getDay: 0=dim,1=lun...6=sam
+
+    // Vérifier chevauchement sur la même date
+    const overlap = await pool.query(
+      `SELECT id FROM disponibilites_tuteur
+       WHERE tuteur_id=$1 AND date_specifique=$2
+         AND heure_debut < $4 AND heure_fin > $3`,
+      [req.user.id, dateSpecifique, heureDebut, heureFin]
+    );
+    if (overlap.rows.length)
+      return res.status(400).json({ error: 'Chevauchement avec une plage existante sur cette date.' });
+
     const result = await pool.query(
-      `INSERT INTO disponibilites_tuteur (tuteur_id, jour_semaine, heure_debut, heure_fin)
-       VALUES ($1,$2,$3,$4) RETURNING *`,
-      [req.user.id, jourSemaine, heureDebut, heureFin]
+      `INSERT INTO disponibilites_tuteur
+         (tuteur_id, date_specifique, jour_semaine, heure_debut, heure_fin)
+       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [req.user.id, dateSpecifique, jourSemaine, heureDebut, heureFin]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
+    console.error('setDisponibilite error:', err);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 };

@@ -331,6 +331,54 @@ const quitterSalle = async (req, res) => {
   }
 };
 
+// DELETE /api/salles/:id/membres/:userId  — Admin retire un membre
+const retirerMembre = async (req, res) => {
+  const { id, userId } = req.params;
+  try {
+    // Vérifier que le demandeur est ADMIN de cette salle
+    const roleRes = await pool.query(
+      'SELECT role FROM participations WHERE utilisateur_id=$1 AND salle_id=$2',
+      [req.user.id, id]
+    );
+    if (!roleRes.rows.length || roleRes.rows[0].role !== 'ADMIN') {
+      return res.status(403).json({ error: 'Seul l\'admin de la salle peut retirer un membre.' });
+    }
+
+    // Empêcher de se retirer soi-même (utiliser quitterSalle pour ça)
+    if (String(userId) === String(req.user.id)) {
+      return res.status(400).json({ error: 'Utilisez "Quitter la salle" pour vous retirer.' });
+    }
+
+    // Vérifier que la cible est bien membre
+    const membreRes = await pool.query(
+      'SELECT role FROM participations WHERE utilisateur_id=$1 AND salle_id=$2',
+      [userId, id]
+    );
+    if (!membreRes.rows.length) {
+      return res.status(404).json({ error: 'Cet utilisateur n\'est pas membre de cette salle.' });
+    }
+
+    // Empêcher de retirer un CO_ADMIN (tuteur) sans confirmation — on le permet quand même
+    await pool.query(
+      'DELETE FROM participations WHERE utilisateur_id=$1 AND salle_id=$2',
+      [userId, id]
+    );
+
+    // Récupérer nom du membre retiré pour le message de retour
+    const userRes = await pool.query(
+      'SELECT prenom, nom FROM utilisateurs WHERE id=$1', [userId]
+    );
+    const nom = userRes.rows.length
+      ? `${userRes.rows[0].prenom} ${userRes.rows[0].nom}`
+      : 'Membre';
+
+    res.json({ message: `${nom} a été retiré de la salle.`, userId: parseInt(userId) });
+  } catch (err) {
+    console.error('retirerMembre error:', err);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+};
+
 // GET /api/salles/:id/participants
 const getParticipants = async (req, res) => {
   try {
@@ -413,5 +461,6 @@ const uploadFichier = async (req, res) => {
 module.exports = {
   getSalles, getMesSalles, getSalle, createSalle,
   rejoindreSalle, demanderInvitation, quitterSalle,
+  retirerMembre,
   getParticipants, getMessages, getFichiers, uploadFichier
 };
