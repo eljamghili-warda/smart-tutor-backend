@@ -80,7 +80,7 @@ const getPaiementSeance = async (req, res) => {
 // ── POST /api/paiements ───────────────────────────────────────────────────────
 // ÉTAPE 6 du workflow : l'admin salle paie la séance
 // Avant : séance EN_ATTENTE_PAIEMENT
-// Après : séance CONFIRMEE + emails automatiques tuteur + admin salle
+// Après : séance PLANIFIEE (payée, prête) + emails automatiques tuteur + admin salle
 const payerSeance = async (req, res) => {
   const client = await pool.connect();
   try {
@@ -172,10 +172,10 @@ const payerSeance = async (req, res) => {
       ]
     );
 
-    // ✅ ÉTAPE CLÉ : séance → CONFIRMEE (workflow étape 6)
+    // ✅ Séance payée → PLANIFIEE (prête à démarrer)
     await client.query(
       `UPDATE seances
-       SET statut          = 'CONFIRMEE',
+       SET statut          = 'PLANIFIEE',
            statut_paiement = 'PAYE',
            montant_total   = $1
        WHERE id=$2`,
@@ -245,7 +245,7 @@ const payerSeance = async (req, res) => {
       message:      '✅ Paiement effectué — séance confirmée',
       paiement,
       reference,
-      seanceStatut: 'CONFIRMEE',
+      seanceStatut: 'PLANIFIEE',
       montantTotal,
       gainTuteur,
       commission,

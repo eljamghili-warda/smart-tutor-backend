@@ -26,12 +26,11 @@ const getSeances = async (req, res) => {
 };
 
 // ── GET /api/seances/emploi-du-temps ────────────────────────────────────────
-// ── GET /api/seances/emploi-du-temps ────────────────────────────────────────
 const getEmploiDuTemps = async (req, res) => {
   try {
     const { debut, fin } = req.query;
 
-    // 1. Séances (avec PLANIFIEE ajouté)
+    // ── 1. Séances ────────────────────────────────────────────────────────────
     const seancesRes = await pool.query(`
       SELECT s.*, sa.nom as salle_nom, u.prenom || ' ' || u.nom as tuteur_nom,
              'seance' as type_evenement
@@ -41,13 +40,13 @@ const getEmploiDuTemps = async (req, res) => {
       WHERE s.salle_id IN (
         SELECT salle_id FROM participations WHERE utilisateur_id=$1
       )
-      AND s.statut IN ('EN_ATTENTE_PAIEMENT','PLANIFIEE','CONFIRMEE','EN_COURS','REALISEE','ANNULEE')
+      AND s.statut IN ('EN_ATTENTE_PAIEMENT','PLANIFIEE','EN_COURS','REALISEE','ANNULEE')
       AND ($2::timestamp IS NULL OR s.date_debut >= $2::timestamp)
       AND ($3::timestamp IS NULL OR s.date_debut <= $3::timestamp)
       ORDER BY s.date_debut
     `, [req.user.id, debut || null, fin || null]);
 
-    // 2. Examens publiés avec date_debut
+    // ── 2. Examens publiés des salles où l'user est membre ───────────────────
     const examensRes = await pool.query(`
       SELECT e.id, e.titre, e.date_debut, e.date_limite as date_fin,
              e.duree_minutes as duree, e.statut,
@@ -105,7 +104,7 @@ const getCreneauxDisponibles = async (req, res) => {
     const seancesExistantes = await pool.query(
       `SELECT date_debut, duree FROM seances
        WHERE tuteur_id=$1
-         AND statut IN ('EN_ATTENTE_PAIEMENT','CONFIRMEE','EN_COURS')
+         AND statut IN ('EN_ATTENTE_PAIEMENT','PLANIFIEE','EN_COURS')
          AND date_debut BETWEEN NOW() AND NOW() + INTERVAL '14 days'`,
       [tuteurId]
     );
@@ -208,7 +207,7 @@ const createSeance = async (req, res) => {
     const conflict = await pool.query(`
       SELECT id FROM seances
       WHERE tuteur_id=$1
-        AND statut IN ('EN_ATTENTE_PAIEMENT','CONFIRMEE','EN_COURS')
+        AND statut IN ('EN_ATTENTE_PAIEMENT','PLANIFIEE','EN_COURS')
         AND $2::timestamp < date_debut + ($3 * interval '1 minute')
         AND $2::timestamp + ($3 * interval '1 minute') > date_debut
     `, [req.user.id, dateDebut, duree]);
@@ -248,7 +247,7 @@ const createSeance = async (req, res) => {
 
 // ── PUT /api/seances/:id/annuler ──────────────────────────────────────────────
 // ÉTAPE 10 du workflow : tuteur annule une séance
-// Si déjà payée (CONFIRMEE) → remboursement automatique
+// Si déjà payée (PLANIFIEE avec statut_paiement=PAYE) → remboursement automatique
 const annulerSeance = async (req, res) => {
   const client = await pool.connect();
   try {
@@ -278,7 +277,7 @@ const annulerSeance = async (req, res) => {
 
     const seance = seanceRes.rows[0];
 
-    if (!['EN_ATTENTE_PAIEMENT', 'CONFIRMEE'].includes(seance.statut)) {
+    if (!['EN_ATTENTE_PAIEMENT', 'PLANIFIEE'].includes(seance.statut)) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: `Impossible d'annuler une séance en statut : ${seance.statut}` });
     }
@@ -288,8 +287,8 @@ const annulerSeance = async (req, res) => {
 
     let remboursement = false;
 
-    // Si CONFIRMEE (payée) → rembourser automatiquement
-    if (seance.paiement_id) {
+    // Si payée (PLANIFIEE + statut_paiement=PAYE) → rembourser automatiquement
+    if (seance.paiement_id && seance.statut_paiement === 'PAYE') {
       await client.query(
         `UPDATE paiements SET statut='REMBOURSE', date_remboursement=NOW() WHERE id=$1`,
         [seance.paiement_id]
@@ -334,7 +333,7 @@ const getDisponibilites = async (req, res) => {
   try {
     const { tuteurId } = req.query;
     const result = await pool.query(
-      `SELECT * FROM disponibilites_tuteur WHERE tuteur_id=$1 ORDER BY date_specifique NULLS LAST, heure_debut`,
+      `SELECT * FROM disponibilites_tuteur WHERE tuteur_id=$1 ORDER BY jour_semaine, heure_debut`,
       [tuteurId || req.user.id]
     );
     res.json(result.rows);
@@ -346,35 +345,21 @@ const getDisponibilites = async (req, res) => {
 // ── POST /api/seances/disponibilites ─────────────────────────────────────────
 const setDisponibilite = async (req, res) => {
   try {
-    const { dateSpecifique, heureDebut, heureFin } = req.body;
-    if (!dateSpecifique || !heureDebut || !heureFin)
-      return res.status(400).json({ error: 'dateSpecifique, heureDebut, heureFin requis' });
+    const { jourSemaine, heureDebut, heureFin } = req.body;
+    if (!jourSemaine || !heureDebut || !heureFin)
+      return res.status(400).json({ error: 'jourSemaine, heureDebut, heureFin requis' });
+    if (parseInt(jourSemaine) < 1 || parseInt(jourSemaine) > 7)
+      return res.status(400).json({ error: 'jourSemaine : 1=Lundi … 7=Dimanche' });
     if (heureDebut >= heureFin)
       return res.status(400).json({ error: 'heureFin doit être après heureDebut' });
 
-    // Calculer le jour de la semaine depuis la date (1=Lundi ... 7=Dimanche)
-    const d = new Date(dateSpecifique);
-    const jourSemaine = d.getDay() === 0 ? 7 : d.getDay(); // getDay: 0=dim,1=lun...6=sam
-
-    // Vérifier chevauchement sur la même date
-    const overlap = await pool.query(
-      `SELECT id FROM disponibilites_tuteur
-       WHERE tuteur_id=$1 AND date_specifique=$2
-         AND heure_debut < $4 AND heure_fin > $3`,
-      [req.user.id, dateSpecifique, heureDebut, heureFin]
-    );
-    if (overlap.rows.length)
-      return res.status(400).json({ error: 'Chevauchement avec une plage existante sur cette date.' });
-
     const result = await pool.query(
-      `INSERT INTO disponibilites_tuteur
-         (tuteur_id, date_specifique, jour_semaine, heure_debut, heure_fin)
-       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-      [req.user.id, dateSpecifique, jourSemaine, heureDebut, heureFin]
+      `INSERT INTO disponibilites_tuteur (tuteur_id, jour_semaine, heure_debut, heure_fin)
+       VALUES ($1,$2,$3,$4) RETURNING *`,
+      [req.user.id, jourSemaine, heureDebut, heureFin]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
-    console.error('setDisponibilite error:', err);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 };
@@ -423,16 +408,16 @@ const FENETRE_MINUTES = 5;
 
 const verifierSeancesExpirees = async () => {
   try {
-    // 1. Séances CONFIRMEE sans appel dont la fin + 5min est dépassée → ANNULEE
+    // 1. Séances PLANIFIEE sans appel dont la fin + 5min est dépassée → ANNULEE
     const annulees = await pool.query(
       `UPDATE seances SET statut='ANNULEE'
-       WHERE statut='CONFIRMEE'
+       WHERE statut='PLANIFIEE'
          AND session_appel_id IS NULL
          AND (date_debut + (duree * interval '1 minute') + interval '5 minutes') < NOW()
        RETURNING id`
     );
     if (annulees.rows.length)
-      console.log(`🔄 ${annulees.rows.length} séance(s) CONFIRMEE sans appel → ANNULEE`);
+      console.log(`🔄 ${annulees.rows.length} séance(s) PLANIFIEE sans appel → ANNULEE`);
 
     // 2. Séances EN_COURS dont l'appel est terminé → REALISEE ou ANNULEE selon règle 5 min
     const sesTerminees = await pool.query(

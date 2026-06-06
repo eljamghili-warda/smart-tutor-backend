@@ -181,16 +181,16 @@ const setupSocket = (io) => {
         // Si seanceId non fourni → chercher automatiquement une séance ±5min
         let resolvedSeanceId = seanceId || null;
         if (!resolvedSeanceId) {
-          const seanceMatch = await pool.query(
-            `SELECT id FROM seances
-             WHERE salle_id = $1
-               AND statut = 'PLANIFIEE'
-               AND date_debut BETWEEN NOW() - INTERVAL '5 minutes'
-                                AND NOW() + INTERVAL '5 minutes'
-             ORDER BY ABS(EXTRACT(EPOCH FROM (date_debut - NOW())))
-             LIMIT 1`,
-            [salleId]
-          );
+         const seanceMatch = await pool.query(
+  `SELECT id FROM seances
+   WHERE salle_id = $1
+     AND statut IN ('EN_ATTENTE_PAIEMENT', 'CONFIRMEE')   // ← modifié
+     AND date_debut BETWEEN NOW() - INTERVAL '5 minutes'
+                      AND NOW() + INTERVAL '5 minutes'
+   ORDER BY ABS(EXTRACT(EPOCH FROM (date_debut - NOW())))
+   LIMIT 1`,
+  [salleId]
+);
           if (seanceMatch.rows.length > 0) {
             resolvedSeanceId = seanceMatch.rows[0].id;
             console.log(`📅 Séance auto-détectée: ${resolvedSeanceId}`);
@@ -222,9 +222,10 @@ const setupSocket = (io) => {
             if (!debutValide || !finValide) {
               // L'appel est lancé hors de la fenêtre valide → séance ANNULEE
               await pool.query(
-                `UPDATE seances SET statut='ANNULEE' WHERE id=$1 AND statut='PLANIFIEE'`,
-                [resolvedSeanceId]
-              );
+  `UPDATE seances SET statut='ANNULEE' 
+   WHERE id=$1 AND statut IN ('EN_ATTENTE_PAIEMENT', 'CONFIRMEE')`,
+  [resolvedSeanceId]
+);
               await pool.query(
                 `UPDATE sessions_appel SET actif=FALSE, date_fin=NOW(), duree_reelle_minutes=0
                  WHERE id=$1`,
@@ -253,11 +254,11 @@ const setupSocket = (io) => {
             }
           }
 
-          await pool.query(
-            `UPDATE seances SET statut='EN_COURS', session_appel_id=$1
-             WHERE id=$2 AND statut='PLANIFIEE'`,
-            [sessionId, resolvedSeanceId]
-          );
+         await pool.query(
+  `UPDATE seances SET statut='EN_COURS', session_appel_id=$1
+   WHERE id=$2 AND statut IN ('EN_ATTENTE_PAIEMENT', 'CONFIRMEE')`,
+  [sessionId, resolvedSeanceId]
+);
           io.to(`salle:${salleId}`).emit('seance:updated', {
             seanceId: resolvedSeanceId,
             statut: 'EN_COURS',
@@ -339,11 +340,11 @@ const setupSocket = (io) => {
         }
 
         const updatedSeance = await pool.query(
-          `UPDATE seances SET statut=$1
-           WHERE id=$2 AND statut IN ('EN_COURS', 'PLANIFIEE')
-           RETURNING id`,
-          [statutFinal, seanceId]
-        );
+  `UPDATE seances SET statut=$1
+   WHERE id=$2 AND statut IN ('EN_COURS', 'CONFIRMEE')
+   RETURNING id`,
+  [statutFinal, seanceId]
+);
 
         if (updatedSeance.rows.length > 0) {
           io.to(`salle:${salleId}`).emit('seance:updated', {
