@@ -211,6 +211,142 @@ const getSeancesAdmin = async (req, res) => {
   }
 };
 
+
+// ── GET /api/admin/examens ───────────────────────────────────────────────────
+const getExamensAdmin = async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        e.id, e.titre, e.description, e.statut, e.note_passage,
+        e.duree_minutes, e.created_at, e.published_at,
+        s.nom as salle_nom,
+        u.prenom as tuteur_prenom, u.nom as tuteur_nom, u.email as tuteur_email,
+        COUNT(DISTINCT te.id) as nb_tentatives,
+        COUNT(DISTINCT te.id) FILTER (WHERE te.statut='REUSSI') as nb_reussis,
+        COUNT(DISTINCT te.id) FILTER (WHERE te.statut='ECHOUE') as nb_echoues,
+        COUNT(DISTINCT te.id) FILTER (WHERE te.statut='EN_COURS') as nb_en_cours
+      FROM examens e
+      JOIN salles s ON e.salle_id = s.id
+      JOIN utilisateurs u ON e.tuteur_id = u.id
+      LEFT JOIN tentatives_examen te ON te.examen_id = e.id
+      GROUP BY e.id, s.nom, u.prenom, u.nom, u.email
+      ORDER BY e.created_at DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('getExamensAdmin error:', err);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+};
+
+// ── GET /api/admin/examens/:id/details ──────────────────────────────────────
+const getExamenDetails = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [examen, tentatives] = await Promise.all([
+      pool.query(`
+        SELECT e.*, s.nom as salle_nom,
+               u.prenom as tuteur_prenom, u.nom as tuteur_nom
+        FROM examens e
+        JOIN salles s ON e.salle_id = s.id
+        JOIN utilisateurs u ON e.tuteur_id = u.id
+        WHERE e.id=$1
+      `, [id]),
+      pool.query(`
+        SELECT te.id, te.score_obtenu, te.pourcentage, te.statut,
+               te.started_at, te.submitted_at,
+               u.prenom, u.nom, u.email, u.photo_profil
+        FROM tentatives_examen te
+        JOIN utilisateurs u ON te.etudiant_id = u.id
+        WHERE te.examen_id=$1
+        ORDER BY te.submitted_at DESC NULLS LAST
+      `, [id]),
+    ]);
+    if (!examen.rows.length) return res.status(404).json({ error: 'Examen introuvable' });
+    res.json({ examen: examen.rows[0], tentatives: tentatives.rows });
+  } catch (err) {
+    console.error('getExamenDetails error:', err);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+};
+
+// ── GET /api/admin/tuteurs/activite ─────────────────────────────────────────
+const getTuteursActivite = async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        u.id, u.prenom, u.nom, u.email, u.photo_profil,
+        t.statut, t.note_moyenne, t.specialites,
+        COUNT(DISTINCT d.id) as nb_disponibilites,
+        COUNT(DISTINCT s.id) as nb_seances,
+        COUNT(DISTINCT s.id) FILTER (WHERE s.statut='REALISEE') as nb_realisees,
+        CASE WHEN COUNT(DISTINCT d.id) > 0 THEN 'ACTIF' ELSE 'INACTIF' END as activite
+      FROM utilisateurs u
+      JOIN tuteurs t ON u.id = t.utilisateur_id
+      LEFT JOIN disponibilites_tuteur d ON u.id = d.tuteur_id
+      LEFT JOIN seances s ON u.id = s.tuteur_id
+      WHERE t.statut = 'ACTIVE'
+      GROUP BY u.id, u.prenom, u.nom, u.email, u.photo_profil, t.statut, t.note_moyenne, t.specialites
+      ORDER BY nb_disponibilites DESC, nb_realisees DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('getTuteursActivite error:', err);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+};
+
+// ── GET /api/admin/seances/stats ─────────────────────────────────────────────
+const getSeancesStats = async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        statut,
+        COUNT(*) as nb,
+        COALESCE(SUM(montant_total), 0) as montant
+      FROM seances
+      GROUP BY statut
+      ORDER BY statut
+    `);
+    const recent = await pool.query(`
+      SELECT s.id, s.titre, s.statut, s.date_debut, s.montant_total, s.statut_paiement,
+             u.prenom as tuteur_prenom, u.nom as tuteur_nom,
+             sa.nom as salle_nom
+      FROM seances s
+      LEFT JOIN utilisateurs u ON s.tuteur_id = u.id
+      LEFT JOIN salles sa ON s.salle_id = sa.id
+      ORDER BY s.date_debut DESC
+      LIMIT 10
+    `);
+    res.json({ parStatut: result.rows, recentes: recent.rows });
+  } catch (err) {
+    console.error('getSeancesStats error:', err);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+};
+
+// ── GET /api/admin/revenus/details ───────────────────────────────────────────
+const getRevenusDetails = async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        COALESCE(SUM(montant_total) FILTER (WHERE statut IN ('COMPLETE','EN_ATTENTE_LIBERATION','LIBERE')), 0) as total_encaisse,
+        COALESCE(SUM(montant_total) FILTER (WHERE statut='EN_ATTENTE_LIBERATION'), 0) as en_escrow,
+        COALESCE(SUM(commission_plateforme) FILTER (WHERE statut='LIBERE'), 0) as commissions_realisees,
+        COALESCE(SUM(commission_plateforme) FILTER (WHERE statut='EN_ATTENTE_LIBERATION'), 0) as commissions_en_attente,
+        COALESCE(SUM(montant_total) FILTER (WHERE statut='REMBOURSE'), 0) as total_rembourse,
+        COALESCE(SUM(gain_tuteur) FILTER (WHERE statut='LIBERE'), 0) as total_verse_tuteurs,
+        COUNT(*) FILTER (WHERE statut IN ('COMPLETE','EN_ATTENTE_LIBERATION','LIBERE')) as nb_paiements,
+        COUNT(*) FILTER (WHERE statut='REMBOURSE') as nb_remboursements
+      FROM paiements
+    `);
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('getRevenusDetails error:', err);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+};
+
 module.exports = {
   getStats,
   getUtilisateurs,
@@ -221,4 +357,9 @@ module.exports = {
   getSallesAdmin,
   fermerSalle,
   getSeancesAdmin,
+  getExamensAdmin,
+  getExamenDetails,
+  getTuteursActivite,
+  getSeancesStats,
+  getRevenusDetails,
 };

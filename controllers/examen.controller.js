@@ -902,7 +902,113 @@ const telechargerCertificat = async (req, res) => {
   }
 };
 
+// ══════════════════════════════════════════════════════════════════
+// TUTEUR — Statistiques complètes d'un examen
+// GET /api/examens/:id/stats
+// ══════════════════════════════════════════════════════════════════
+const getStatsExamen = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const examRes = await pool.query(
+      `SELECT e.*, s.nom as salle_nom,
+              u.prenom as tuteur_prenom, u.nom as tuteur_nom
+       FROM examens e
+       JOIN salles s ON e.salle_id = s.id
+       JOIN utilisateurs u ON e.tuteur_id = u.id
+       WHERE e.id = $1`, [id]
+    );
+    if (!examRes.rows.length)
+      return res.status(404).json({ error: 'Examen introuvable' });
+    const examen = examRes.rows[0];
+
+    if (String(examen.tuteur_id) !== String(req.user.id) && req.user.role !== 'admin')
+      return res.status(403).json({ error: 'Non autorisé' });
+
+    // Colonnes optionnelles
+    let extra = {};
+    try {
+      const r = await pool.query(
+        `SELECT date_debut, date_limite, date_affichage_resultats, mode_affichage
+         FROM examens WHERE id = $1`, [id]
+      );
+      if (r.rows.length) extra = r.rows[0];
+    } catch (_) {}
+
+    // Questions avec réponses
+    const qRes = await pool.query(
+      `SELECT q.*,
+        COALESCE(
+          json_agg(
+            json_build_object('id', r.id, 'texte', r.texte, 'ordre', r.ordre, 'est_correcte', r.est_correcte)
+            ORDER BY r.ordre
+          ) FILTER (WHERE r.id IS NOT NULL), '[]'
+        ) as reponses
+       FROM questions_examen q
+       LEFT JOIN reponses_question r ON r.question_id = q.id
+       WHERE q.examen_id = $1
+       GROUP BY q.id ORDER BY q.ordre`, [id]
+    );
+
+    // Toutes les tentatives avec infos étudiant
+    const tentRes = await pool.query(
+      `SELECT t.*,
+              u.prenom as etudiant_prenom, u.nom as etudiant_nom, u.email as etudiant_email
+       FROM tentatives_examen t
+       JOIN utilisateurs u ON t.etudiant_id = u.id
+       WHERE t.examen_id = $1
+       ORDER BY t.started_at DESC`, [id]
+    );
+
+    // Stats
+    const terminees = tentRes.rows.filter(t => t.statut !== 'EN_COURS');
+    const reussies  = tentRes.rows.filter(t => t.statut === 'REUSSI');
+    const scores    = terminees.map(t => parseFloat(t.pourcentage)).filter(s => !isNaN(s));
+    const moy       = scores.length ? (scores.reduce((a,b) => a+b, 0) / scores.length).toFixed(1) : null;
+
+    res.json({
+      examen: { ...examen, ...extra },
+      questions: qRes.rows,
+      tentatives: tentRes.rows,
+      stats: {
+        total:         tentRes.rows.length,
+        terminees:     terminees.length,
+        reussies:      reussies.length,
+        echecs:        terminees.length - reussies.length,
+        tauxReussite:  terminees.length ? ((reussies.length / terminees.length)*100).toFixed(0) : null,
+        moyenneScore:  moy,
+      },
+    });
+  } catch (err) {
+    console.error('getStatsExamen error:', err);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════
+// ÉTUDIANT — Dernière tentative pour un examen
+// GET /api/examens/:id/ma-derniere-tentative
+// ══════════════════════════════════════════════════════════════════
+const getMaDerniereTentative = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM tentatives_examen
+       WHERE examen_id = $1 AND etudiant_id = $2
+       ORDER BY started_at DESC LIMIT 1`,
+      [id, req.user.id]
+    );
+    if (!rows.length)
+      return res.status(404).json({ error: 'Aucune tentative trouvée.' });
+    res.json({ tentativeId: rows[0].id, tentative: rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+};
+
+
 module.exports = {
+  getStatsExamen,
+  getMaDerniereTentative,
   createExamen, updateExamen,
   addQuestion, updateQuestion, deleteQuestion,
   publierExamen, archiverExamen,
