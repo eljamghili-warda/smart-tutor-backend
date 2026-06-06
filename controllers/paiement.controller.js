@@ -172,11 +172,11 @@ const payerSeance = async (req, res) => {
       ]
     );
 
-    // ✅ Séance payée → PLANIFIEE (prête à démarrer)
+    // ✅ Séance payée → CONFIRMEE (argent en escrow chez SmartEdu)
     await client.query(
       `UPDATE seances
-       SET statut          = 'PLANIFIEE',
-           statut_paiement = 'PAYE',
+       SET statut          = 'CONFIRMEE',
+           statut_paiement = 'EN_ATTENTE_LIBERATION',
            montant_total   = $1
        WHERE id=$2`,
       [montantTotal, seanceId]
@@ -186,15 +186,9 @@ const payerSeance = async (req, res) => {
 
     const paiement = paiementRes.rows[0];
 
-    // ── VIREMENT AUTOMATIQUE SIMULÉ AU TUTEUR (85%) ──────────────────────────
-    // En production : appel API bancaire (Chargily, virement RIB, etc.)
-    // Ici on log le virement et on le marque comme effectué
-    if (seance.tuteur_rib) {
-      console.log(`[VIREMENT] ${gainTuteur} DH → RIB ${seance.tuteur_rib} (${seance.tuteur_prenom} ${seance.tuteur_nom} / ${seance.tuteur_nom_banque || 'banque inconnue'})`);
-      // En production : await virementBancaire({ rib: seance.tuteur_rib, montant: gainTuteur, reference })
-    } else {
-      console.warn(`[VIREMENT] Tuteur ${seance.tuteur_id} n'a pas de RIB configuré — virement en attente`);
-    }
+    // ── ESCROW : L'argent reste chez SmartEdu jusqu'à réalisation ──────────────
+    // Aucun virement n'est effectué ici. Le tuteur sera payé après REALISEE.
+    console.log(`[ESCROW] ${montantTotal} DH bloqué pour séance ${seanceId} — libération après réalisation`);
 
     // Emails automatiques (asynchrones — ne bloquent pas la réponse)
     const payeurRes = await pool.query(
@@ -202,7 +196,7 @@ const payerSeance = async (req, res) => {
     );
     const payeur = payeurRes.rows[0];
 
-    // Email à l'admin salle (confirmation de paiement)
+    // Email à l'admin salle (confirmation paiement + info escrow)
     if (payeur?.email) {
       emailService.sendConfirmationPaiementAdminSalle({
         to:     payeur.email,
@@ -211,10 +205,11 @@ const payerSeance = async (req, res) => {
         salle:  { nom: seance.salle_nom },
         tuteur: { prenom: seance.tuteur_prenom, nom: seance.tuteur_nom },
         paiement,
+        escrow: true,
       }).catch(console.error);
     }
 
-    // Email au tuteur (notification séance confirmée + montant reçu)
+    // Email au tuteur (séance confirmée, gain versé après réalisation)
     if (seance.tuteur_email) {
       emailService.sendNotificationTuteur({
         to:     seance.tuteur_email,
@@ -224,7 +219,7 @@ const payerSeance = async (req, res) => {
         payeur: { prenom: payeur?.prenom, nom: payeur?.nom },
         paiement,
         gainTuteur,
-        rib: seance.tuteur_rib,
+        escrow: true,
       }).catch(console.error);
     }
 
@@ -242,19 +237,19 @@ const payerSeance = async (req, res) => {
     }
 
     res.status(201).json({
-      message:      '✅ Paiement effectué — séance confirmée',
+      message:      '✅ Paiement enregistré — fonds en escrow jusqu\'à la réalisation de la séance',
       paiement,
       reference,
-      seanceStatut: 'PLANIFIEE',
+      seanceStatut: 'CONFIRMEE',
       montantTotal,
       gainTuteur,
       commission,
+      escrow: true,
       tuteur: {
         prenom:    seance.tuteur_prenom,
         nom:       seance.tuteur_nom,
         rib:       seance.tuteur_rib,
         nomBanque: seance.tuteur_nom_banque,
-        virementEffectue: !!seance.tuteur_rib,
       },
     });
   } catch (err) {
@@ -498,6 +493,102 @@ const getAllPaiements = async (req, res) => {
   }
 };
 
+
+// ── POST /api/paiements/liberer/:seanceId ────────────────────────────────────
+// Appelé automatiquement quand séance → REALISEE
+// Libère 85% au tuteur + 15% plateforme
+const libererFonds = async (seanceId) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Récupérer le paiement en attente de libération
+    const paiementRes = await client.query(
+      `SELECT p.*,
+              s.titre as seance_titre, s.date_debut, s.matiere, s.salle_id,
+              sa.nom as salle_nom,
+              ut.email  as tuteur_email,
+              ut.prenom as tuteur_prenom,
+              ut.nom    as tuteur_nom,
+              t.rib         as tuteur_rib,
+              t.nom_banque  as tuteur_nom_banque,
+              up.email  as payeur_email,
+              up.prenom as payeur_prenom,
+              up.nom    as payeur_nom
+       FROM paiements p
+       JOIN seances s ON p.seance_id = s.id
+       JOIN salles sa ON s.salle_id = sa.id
+       LEFT JOIN utilisateurs ut ON p.tuteur_id = ut.id
+       LEFT JOIN tuteurs t ON ut.id = t.utilisateur_id
+       LEFT JOIN utilisateurs up ON p.payeur_id = up.id
+       WHERE p.seance_id = $1 AND p.statut = 'EN_ATTENTE_LIBERATION'`,
+      [seanceId]
+    );
+
+    if (!paiementRes.rows.length) {
+      await client.query('ROLLBACK');
+      console.log(`[LIBERER] Aucun paiement EN_ATTENTE_LIBERATION pour séance ${seanceId}`);
+      return null;
+    }
+
+    const p = paiementRes.rows[0];
+
+    // Libérer les fonds
+    await client.query(
+      `UPDATE paiements SET statut='LIBERE', date_remboursement=NOW() WHERE id=$1`,
+      [p.id]
+    );
+    await client.query(
+      `UPDATE seances SET statut_paiement='LIBERE' WHERE id=$1`,
+      [seanceId]
+    );
+
+    await client.query('COMMIT');
+
+    // Virement simulé au tuteur (85%)
+    if (p.tuteur_rib) {
+      console.log(`[VIREMENT] ${p.gain_tuteur} DH → RIB ${p.tuteur_rib} (${p.tuteur_prenom} ${p.tuteur_nom})`);
+    } else {
+      console.warn(`[VIREMENT] Tuteur ${p.tuteur_id} sans RIB — virement manuel requis`);
+    }
+
+    // Email au tuteur : paiement versé
+    if (p.tuteur_email) {
+      emailService.sendVirementTuteur({
+        to:  p.tuteur_email,
+        nom: `${p.tuteur_prenom} ${p.tuteur_nom}`,
+        seance:   { titre: p.seance_titre, date_debut: p.date_debut },
+        gainTuteur: p.gain_tuteur,
+        reference: p.reference,
+        rib: p.tuteur_rib,
+      }).catch(console.error);
+    }
+
+    // Email à l'admin salle : séance réalisée, paiement libéré
+    if (p.payeur_email) {
+      emailService.sendSeanceRealiseeAdmin({
+        to:  p.payeur_email,
+        nom: `${p.payeur_prenom} ${p.payeur_nom}`,
+        seance:   { titre: p.seance_titre, date_debut: p.date_debut },
+        tuteur:   { prenom: p.tuteur_prenom, nom: p.tuteur_nom },
+        montantTotal: p.montant_total,
+        gainTuteur:   p.gain_tuteur,
+        commission:   p.commission_plateforme,
+        reference: p.reference,
+      }).catch(console.error);
+    }
+
+    console.log(`✅ [LIBERER] Fonds libérés — séance ${seanceId} — ${p.gain_tuteur} DH → tuteur / ${p.commission_plateforme} DH → SmartEdu`);
+    return p;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('libererFonds error:', err);
+    return null;
+  } finally {
+    client.release();
+  }
+};
+
 module.exports = {
   getPaiementSeance,
   payerSeance,
@@ -506,4 +597,5 @@ module.exports = {
   getMesRevenus,
   getAdminRevenus,
   getAllPaiements,
+  libererFonds,
 };

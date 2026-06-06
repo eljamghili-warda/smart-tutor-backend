@@ -70,13 +70,13 @@ const wrapTemplate = (contenu) => `
 `;
 
 // ── EMAIL 1 : Confirmation paiement (admin salle) ───────────────────────────
-const sendConfirmationPaiementAdminSalle = async ({ to, nom, seance, salle, tuteur, paiement }) => {
+const sendConfirmationPaiementAdminSalle = async ({ to, nom, seance, salle, tuteur, paiement, escrow }) => {
   const transporter = createTransporter();
   const html = wrapTemplate(`
     <div class="icon">✅</div>
     <div class="title">Paiement confirmé !</div>
-    <div class="subtitle">Bonjour ${nom}, votre paiement a été traité avec succès.</div>
-    
+    <div class="subtitle">Bonjour ${nom}, votre paiement de ${paiement.montant_total} DH a été enregistré avec succès.</div>
+
     <div class="box">
       <div class="row"><span class="label">Séance</span><span class="value">${seance.titre}</span></div>
       <div class="row"><span class="label">Salle</span><span class="value">${salle.nom}</span></div>
@@ -88,57 +88,68 @@ const sendConfirmationPaiementAdminSalle = async ({ to, nom, seance, salle, tute
       <div class="row"><span class="label">Référence</span><span class="value">${paiement.reference}</span></div>
     </div>
 
-    <div class="total">
-      <span class="total-label">💰 Montant payé</span>
-      <span class="total-value">${paiement.montant_total} DH</span>
+    <div class="box" style="background:#eff6ff;border-color:#bfdbfe;margin-top:0">
+      <div class="row" style="border:none;flex-direction:column;gap:6px">
+        <span style="font-size:13px;font-weight:700;color:#1d4ed8">🔒 Fonds en sécurité (Escrow)</span>
+        <span style="font-size:12px;color:#3b82f6">
+          Votre paiement est conservé par SmartEdu jusqu'à la réalisation de la séance.<br/>
+          Si la séance est annulée par le tuteur, vous serez remboursé à 100%.
+        </span>
+      </div>
     </div>
 
-    <p style="font-size:13px;color:#64748b;text-align:center;">
-      La séance est maintenant <span class="badge badge-success">CONFIRMÉE</span>.<br/>
-      Un rappel vous sera envoyé 1 heure avant le début.
-    </p>
+    <div class="total">
+      <span class="total-label">💰 Montant sécurisé</span>
+      <span class="total-value">${paiement.montant_total} DH</span>
+    </div>
   `);
 
   await transporter.sendMail({
     from: `"SmartTutor" <${process.env.SMTP_USER}>`,
     to,
-    subject: `✅ Paiement confirmé — ${seance.titre}`,
+    subject: `✅ Paiement confirmé — ${seance.titre} — ${paiement.montant_total} DH`,
     html,
   });
 };
 
 // ── EMAIL 2 : Notification au tuteur ────────────────────────────────────────
-const sendNotificationTuteur = async ({ to, nom, seance, salle, payeur, paiement }) => {
+const sendNotificationTuteur = async ({ to, nom, seance, salle, payeur, paiement, gainTuteur, escrow }) => {
   const transporter = createTransporter();
   const html = wrapTemplate(`
-    <div class="icon">💸</div>
-    <div class="title">Séance confirmée et payée !</div>
-    <div class="subtitle">Bonjour ${nom}, une de vos séances vient d'être payée.</div>
+    <div class="icon">📚</div>
+    <div class="title">Nouvelle séance confirmée !</div>
+    <div class="subtitle">Bonjour ${nom}, votre séance a été réservée et payée par l'admin de salle.</div>
 
     <div class="box">
       <div class="row"><span class="label">Séance</span><span class="value">${seance.titre}</span></div>
       <div class="row"><span class="label">Salle</span><span class="value">${salle.nom}</span></div>
-      <div class="row"><span class="label">Payé par</span><span class="value">${payeur.prenom} ${payeur.nom}</span></div>
+      <div class="row"><span class="label">Réservé par</span><span class="value">${payeur.prenom} ${payeur.nom}</span></div>
       <div class="row"><span class="label">Matière</span><span class="value">${seance.matiere || '—'}</span></div>
       <div class="row"><span class="label">Date</span><span class="value">${new Date(seance.date_debut).toLocaleString('fr-FR', { dateStyle:'full', timeStyle:'short' })}</span></div>
       <div class="row"><span class="label">Durée</span><span class="value">${seance.duree} minutes</span></div>
+      <div class="row"><span class="label">Référence</span><span class="value">${paiement.reference}</span></div>
     </div>
 
-    <div class="total">
-      <span class="total-label">🎉 Votre gain</span>
-      <span class="total-value">${paiement.gain_tuteur} DH</span>
+    <div class="box" style="background:#f0fdf4;border-color:#bbf7d0;margin-top:0">
+      <div class="row"><span class="label">Montant total</span><span class="value">${paiement.montant_total} DH</span></div>
+      <div class="row" style="border:none"><span class="label">Votre rémunération (85%)</span><span class="value" style="color:#16a34a;font-weight:800">${gainTuteur || paiement.gain_tuteur} DH</span></div>
     </div>
 
-    <p style="font-size:12px;color:#64748b;text-align:center;">
-      Commission plateforme : ${paiement.commission_plateforme} DH (15%)<br/>
-      Montant total réglé : ${paiement.montant_total} DH
-    </p>
+    <div class="box" style="background:#eff6ff;border-color:#bfdbfe;margin-top:0">
+      <div class="row" style="border:none;flex-direction:column;gap:4px">
+        <span style="font-size:12px;font-weight:700;color:#1d4ed8">⏳ Versement après réalisation</span>
+        <span style="font-size:12px;color:#3b82f6">
+          Votre rémunération de ${gainTuteur || paiement.gain_tuteur} DH sera versée automatiquement
+          après la réalisation de la séance.
+        </span>
+      </div>
+    </div>
   `);
 
   await transporter.sendMail({
     from: `"SmartTutor" <${process.env.SMTP_USER}>`,
     to,
-    subject: `💰 Séance payée — ${seance.titre}`,
+    subject: `📚 Séance confirmée — ${seance.titre}`,
     html,
   });
 };
@@ -240,12 +251,83 @@ const sendAnnulationTuteur = async ({ to, nom, seance, motif }) => {
   });
 };
 
+
+// ── EMAIL : Virement au tuteur après réalisation ─────────────────────────────
+const sendVirementTuteur = async ({ to, nom, seance, gainTuteur, reference, rib }) => {
+  const transporter = createTransporter();
+  const html = wrapTemplate(`
+    <div class="icon">🎉</div>
+    <div class="title">Paiement versé !</div>
+    <div class="subtitle">Bonjour ${nom}, votre séance a été réalisée avec succès.</div>
+
+    <div class="box">
+      <div class="row"><span class="label">Séance réalisée</span><span class="value">${seance.titre}</span></div>
+      <div class="row"><span class="label">Date</span><span class="value">${new Date(seance.date_debut).toLocaleString('fr-FR', { dateStyle:'full', timeStyle:'short' })}</span></div>
+      <div class="row"><span class="label">Référence</span><span class="value" style="font-family:monospace">${reference}</span></div>
+      ${rib ? `<div class="row"><span class="label">RIB crédité</span><span class="value">${rib}</span></div>` : ''}
+    </div>
+
+    <div class="total">
+      <span class="total-label">💰 Montant versé</span>
+      <span class="total-value">${gainTuteur} DH</span>
+    </div>
+
+    <p style="font-size:13px;color:#64748b;text-align:center;">
+      Votre rémunération a été transférée sur votre compte bancaire.<br/>
+      Merci pour votre contribution à SmartEdu !
+    </p>
+  `);
+
+  await transporter.sendMail({
+    from: `"SmartTutor" <${process.env.SMTP_USER}>`,
+    to,
+    subject: `💰 Paiement versé — ${gainTuteur} DH — ${seance.titre}`,
+    html,
+  });
+};
+
+// ── EMAIL : Admin salle — séance réalisée ────────────────────────────────────
+const sendSeanceRealiseeAdmin = async ({ to, nom, seance, tuteur, montantTotal, gainTuteur, commission, reference }) => {
+  const transporter = createTransporter();
+  const html = wrapTemplate(`
+    <div class="icon">✅</div>
+    <div class="title">Séance réalisée avec succès</div>
+    <div class="subtitle">Bonjour ${nom}, la séance s'est déroulée et le paiement a été libéré.</div>
+
+    <div class="box">
+      <div class="row"><span class="label">Séance</span><span class="value">${seance.titre}</span></div>
+      <div class="row"><span class="label">Tuteur</span><span class="value">${tuteur.prenom} ${tuteur.nom}</span></div>
+      <div class="row"><span class="label">Date</span><span class="value">${new Date(seance.date_debut).toLocaleString('fr-FR', { dateStyle:'full', timeStyle:'short' })}</span></div>
+      <div class="row"><span class="label">Référence</span><span class="value" style="font-family:monospace">${reference}</span></div>
+    </div>
+
+    <div class="box" style="margin-top:0">
+      <div class="row"><span class="label">Montant total payé</span><span class="value">${montantTotal} DH</span></div>
+      <div class="row"><span class="label">Versé au tuteur (85%)</span><span class="value">${gainTuteur} DH</span></div>
+      <div class="row" style="border:none"><span class="label">Commission SmartEdu (15%)</span><span class="value" style="color:#7c3aed;font-weight:800">${commission} DH</span></div>
+    </div>
+
+    <p style="font-size:13px;color:#64748b;text-align:center;">
+      La séance est maintenant clôturée. Merci d'utiliser SmartEdu !
+    </p>
+  `);
+
+  await transporter.sendMail({
+    from: `"SmartTutor" <${process.env.SMTP_USER}>`,
+    to,
+    subject: `✅ Séance réalisée — paiement libéré — ${seance.titre}`,
+    html,
+  });
+};
+
 module.exports = {
   sendConfirmationPaiementAdminSalle,
   sendNotificationTuteur,
   sendConfirmationRemboursement,
   sendAnnulationTuteur,
   sendNotificationAdminPlateforme,
+  sendVirementTuteur,
+  sendSeanceRealiseeAdmin,
   sendCertificatEmail,
   sendNotifTuteurCertificat,
 };

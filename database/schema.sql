@@ -529,6 +529,21 @@ ALTER TABLE disponibilites_tuteur
 -- Index pour les requêtes par date
 CREATE INDEX IF NOT EXISTS idx_dispos_date ON disponibilites_tuteur(date_specifique);
 CREATE INDEX IF NOT EXISTS idx_dispos_tuteur_date ON disponibilites_tuteur(tuteur_id, date_specifique);
+-- 1. Nouveaux statuts pour la table paiements
+ALTER TABLE paiements
+  DROP CONSTRAINT IF EXISTS paiements_statut_check;
+ALTER TABLE paiements
+  ADD CONSTRAINT paiements_statut_check
+  CHECK (statut IN ('COMPLETE','REMBOURSE','EN_ATTENTE_LIBERATION','LIBERE'));
+
+-- 2. Nouveaux statuts_paiement pour la table seances
+ALTER TABLE seances
+  DROP CONSTRAINT IF EXISTS seances_statut_paiement_check;
+ALTER TABLE seances
+  ADD CONSTRAINT seances_statut_paiement_check
+  CHECK (statut_paiement IN ('EN_ATTENTE','PAYE','REMBOURSE','EN_ATTENTE_LIBERATION','LIBERE'));
+  ALTER TABLE seances
+  ALTER COLUMN statut_paiement TYPE VARCHAR(30);
 
 -- Admin account initial
 INSERT INTO utilisateurs (prenom, nom, email, mot_de_passe, role)

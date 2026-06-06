@@ -1,4 +1,5 @@
 const { pool } = require('../config/db');
+const { libererFonds } = require('./paiement.controller');
 const emailService = require('../services/email.service');
 
 // ── GET /api/seances?salleId=&tuteurId= ──────────────────────────────────────
@@ -40,7 +41,7 @@ const getEmploiDuTemps = async (req, res) => {
       WHERE s.salle_id IN (
         SELECT salle_id FROM participations WHERE utilisateur_id=$1
       )
-      AND s.statut IN ('EN_ATTENTE_PAIEMENT','PLANIFIEE','EN_COURS','REALISEE','ANNULEE')
+      AND s.statut IN ('EN_ATTENTE_PAIEMENT','PLANIFIEE','CONFIRMEE','EN_COURS','REALISEE','ANNULEE')
       AND ($2::timestamp IS NULL OR s.date_debut >= $2::timestamp)
       AND ($3::timestamp IS NULL OR s.date_debut <= $3::timestamp)
       ORDER BY s.date_debut
@@ -104,7 +105,7 @@ const getCreneauxDisponibles = async (req, res) => {
     const seancesExistantes = await pool.query(
       `SELECT date_debut, duree FROM seances
        WHERE tuteur_id=$1
-         AND statut IN ('EN_ATTENTE_PAIEMENT','PLANIFIEE','EN_COURS')
+         AND statut IN ('EN_ATTENTE_PAIEMENT','PLANIFIEE','CONFIRMEE','EN_COURS')
          AND date_debut BETWEEN NOW() AND NOW() + INTERVAL '14 days'`,
       [tuteurId]
     );
@@ -207,7 +208,7 @@ const createSeance = async (req, res) => {
     const conflict = await pool.query(`
       SELECT id FROM seances
       WHERE tuteur_id=$1
-        AND statut IN ('EN_ATTENTE_PAIEMENT','PLANIFIEE','EN_COURS')
+        AND statut IN ('EN_ATTENTE_PAIEMENT','PLANIFIEE','CONFIRMEE','EN_COURS')
         AND $2::timestamp < date_debut + ($3 * interval '1 minute')
         AND $2::timestamp + ($3 * interval '1 minute') > date_debut
     `, [req.user.id, dateDebut, duree]);
@@ -277,7 +278,7 @@ const annulerSeance = async (req, res) => {
 
     const seance = seanceRes.rows[0];
 
-    if (!['EN_ATTENTE_PAIEMENT', 'PLANIFIEE'].includes(seance.statut)) {
+    if (!['EN_ATTENTE_PAIEMENT', 'PLANIFIEE', 'CONFIRMEE'].includes(seance.statut)) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: `Impossible d'annuler une séance en statut : ${seance.statut}` });
     }
@@ -288,7 +289,7 @@ const annulerSeance = async (req, res) => {
     let remboursement = false;
 
     // Si payée (PLANIFIEE + statut_paiement=PAYE) → rembourser automatiquement
-    if (seance.paiement_id && seance.statut_paiement === 'PAYE') {
+    if (seance.paiement_id && ['PAYE','EN_ATTENTE_LIBERATION'].includes(seance.statut_paiement)) {
       await client.query(
         `UPDATE paiements SET statut='REMBOURSE', date_remboursement=NOW() WHERE id=$1`,
         [seance.paiement_id]
@@ -439,6 +440,11 @@ const verifierSeancesExpirees = async () => {
         [statut, row.seance_id]
       );
       console.log(`${termineTropTot ? '⚠️' : '✅'} Séance ${row.seance_id} → ${statut}`);
+
+      // Si REALISEE → libérer les fonds (85% tuteur + 15% plateforme)
+      if (statut === 'REALISEE') {
+        libererFonds(row.seance_id).catch(console.error);
+      }
     }
   } catch (err) {
     console.error('verifierSeancesExpirees error:', err);
