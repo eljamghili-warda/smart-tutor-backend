@@ -334,7 +334,7 @@ const getDisponibilites = async (req, res) => {
   try {
     const { tuteurId } = req.query;
     const result = await pool.query(
-      `SELECT * FROM disponibilites_tuteur WHERE tuteur_id=$1 ORDER BY jour_semaine, heure_debut`,
+      `SELECT * FROM disponibilites_tuteur WHERE tuteur_id=$1 ORDER BY date_specifique NULLS LAST, heure_debut`,
       [tuteurId || req.user.id]
     );
     res.json(result.rows);
@@ -346,21 +346,45 @@ const getDisponibilites = async (req, res) => {
 // ── POST /api/seances/disponibilites ─────────────────────────────────────────
 const setDisponibilite = async (req, res) => {
   try {
-    const { jourSemaine, heureDebut, heureFin } = req.body;
-    if (!jourSemaine || !heureDebut || !heureFin)
-      return res.status(400).json({ error: 'jourSemaine, heureDebut, heureFin requis' });
-    if (parseInt(jourSemaine) < 1 || parseInt(jourSemaine) > 7)
-      return res.status(400).json({ error: 'jourSemaine : 1=Lundi … 7=Dimanche' });
+    const { dateSpecifique, heureDebut, heureFin } = req.body;
+
+    if (!dateSpecifique || !heureDebut || !heureFin)
+      return res.status(400).json({ error: 'dateSpecifique, heureDebut et heureFin sont requis.' });
     if (heureDebut >= heureFin)
-      return res.status(400).json({ error: 'heureFin doit être après heureDebut' });
+      return res.status(400).json({ error: "L'heure de fin doit être après l'heure de début." });
+
+    // Calculer jour_semaine depuis la date (1=Lundi ... 7=Dimanche)
+    const [y, m, d] = dateSpecifique.split('-').map(Number);
+    const dateObj   = new Date(y, m - 1, d);
+    const jourSemaine = dateObj.getDay() === 0 ? 7 : dateObj.getDay();
+
+    // Vérifier chevauchement sur EXACTEMENT la même date
+    const overlap = await pool.query(
+      `SELECT id FROM disponibilites_tuteur
+       WHERE tuteur_id = $1
+         AND date_specifique = $2
+         AND heure_debut < $4
+         AND heure_fin   > $3`,
+      [req.user.id, dateSpecifique, heureDebut, heureFin]
+    );
+    if (overlap.rows.length)
+      return res.status(400).json({ error: 'Chevauchement avec une plage existante sur cette date.' });
+
+    // Ajouter la colonne date_specifique si elle n'existe pas encore
+    await pool.query(`
+      ALTER TABLE disponibilites_tuteur
+        ADD COLUMN IF NOT EXISTS date_specifique DATE
+    `).catch(() => {});
 
     const result = await pool.query(
-      `INSERT INTO disponibilites_tuteur (tuteur_id, jour_semaine, heure_debut, heure_fin)
-       VALUES ($1,$2,$3,$4) RETURNING *`,
-      [req.user.id, jourSemaine, heureDebut, heureFin]
+      `INSERT INTO disponibilites_tuteur
+         (tuteur_id, date_specifique, jour_semaine, heure_debut, heure_fin)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [req.user.id, dateSpecifique, jourSemaine, heureDebut, heureFin]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
+    console.error('setDisponibilite error:', err);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 };
