@@ -207,79 +207,46 @@ const rejoindreSalle = async (req, res) => {
   }
 };
 
-// POST /api/salles/:id/demander
-// Utilisé par étudiant ET tuteur pour demander à rejoindre une salle
+// POST /api/salles/:id/demander-invitation
 const demanderInvitation = async (req, res) => {
   try {
     const { id } = req.params;
-
     const salle = await pool.query('SELECT * FROM salles WHERE id=$1', [id]);
     if (!salle.rows.length) return res.status(404).json({ error: 'Salle introuvable' });
+    // Salle publique ou privée : l'étudiant envoie une demande à l'admin
+    // (pour les salles publiques, on ne rejoint plus directement, on demande aussi)
 
     // Vérifier si déjà membre
     const deja = await pool.query(
       'SELECT id FROM participations WHERE utilisateur_id=$1 AND salle_id=$2',
       [req.user.id, id]
     );
-    if (deja.rows.length) return res.status(409).json({ error: 'Vous êtes déjà membre de cette salle.' });
+    if (deja.rows.length) return res.status(409).json({ error: 'Vous êtes déjà membre.' });
 
-    // Récupérer l'admin de la salle — chercher d'abord dans participations, sinon via createur_id
-    let adminId = null
-
-    const adminSalle = await pool.query(
-      `SELECT utilisateur_id FROM participations
-       WHERE salle_id=$1 AND role='ADMIN'
-       LIMIT 1`,
-      [id]
-    );
-
-    if (adminSalle.rows.length) {
-      adminId = adminSalle.rows[0].utilisateur_id;
-    } else {
-      // Fallback : utiliser le createur_id de la salle
-      const creator = await pool.query(
-        `SELECT createur_id FROM salles WHERE id=$1`, [id]
-      );
-      if (creator.rows.length && creator.rows[0].createur_id) {
-        adminId = creator.rows[0].createur_id;
-        // Réparer la participation manquante
-        await pool.query(
-          `INSERT INTO participations (utilisateur_id, salle_id, role)
-           VALUES ($1, $2, 'ADMIN')
-           ON CONFLICT (utilisateur_id, salle_id) DO UPDATE SET role='ADMIN'`,
-          [adminId, id]
-        );
-      }
-    }
-
-    if (!adminId) return res.status(404).json({ error: 'Admin de la salle introuvable' });
-
-    // Déterminer le type selon le rôle de l'utilisateur
-    // - Tuteur qui demande → type VERS_TUTEUR (l'admin doit accepter = tuteur rejoint comme CO_ADMIN)
-    // - Étudiant qui demande → type VERS_ETUDIANT (l'admin doit accepter = étudiant rejoint comme MEMBRE)
-    const typeInvitation = req.user.role === 'tuteur' ? 'VERS_TUTEUR' : 'VERS_ETUDIANT';
-
-    // Vérifier si une demande EN_ATTENTE existe déjà (expediteur = demandeur)
+    // Vérifier si une demande existe déjà
     const existing = await pool.query(
-      `SELECT id FROM invitations
-       WHERE salle_id=$1 AND expediteur_id=$2 AND statut='EN_ATTENTE'`,
+      `SELECT id FROM invitations WHERE salle_id=$1 AND destinataire_id=$2 AND statut='EN_ATTENTE'`,
       [id, req.user.id]
     );
     if (existing.rows.length) {
-      return res.status(409).json({ error: 'Demande déjà envoyée, en attente de validation par l\'admin.' });
+      return res.status(409).json({ error: 'Demande déjà envoyée, en attente de l\'admin.' });
     }
+
+    // Créer une invitation de type VERS_ETUDIANT (l'étudiant demande à l'admin)
+    // L'expediteur est l'étudiant, le destinataire est l'admin de la salle
+    const adminSalle = await pool.query(
+      `SELECT utilisateur_id FROM participations WHERE salle_id=$1 AND role='ADMIN'`,
+      [id]
+    );
+    if (!adminSalle.rows.length) return res.status(404).json({ error: 'Admin de la salle introuvable' });
 
     await pool.query(
       `INSERT INTO invitations (salle_id, expediteur_id, destinataire_id, type_invitation)
-       VALUES ($1, $2, $3, $4)`,
-      [id, req.user.id, adminId, typeInvitation]
+       VALUES ($1,$2,$3,'VERS_ETUDIANT')`,
+      [id, req.user.id, adminSalle.rows[0].utilisateur_id]
     );
 
-    const msg = req.user.role === 'tuteur'
-      ? 'Demande d\'enseignement envoyée à l\'admin de la salle.'
-      : 'Demande d\'invitation envoyée à l\'admin de la salle.';
-
-    res.json({ message: msg });
+    res.json({ message: 'Demande d\'invitation envoyée à l\'admin de la salle.' });
   } catch (err) {
     console.error('demanderInvitation error:', err);
     res.status(500).json({ error: 'Erreur serveur' });
@@ -327,54 +294,6 @@ const quitterSalle = async (req, res) => {
     res.json({ message: 'Vous avez quitté la salle' });
   } catch (err) {
     console.error('quitterSalle error:', err);
-    res.status(500).json({ error: 'Erreur serveur' });
-  }
-};
-
-// DELETE /api/salles/:id/membres/:userId  — Admin retire un membre
-const retirerMembre = async (req, res) => {
-  const { id, userId } = req.params;
-  try {
-    // Vérifier que le demandeur est ADMIN de cette salle
-    const roleRes = await pool.query(
-      'SELECT role FROM participations WHERE utilisateur_id=$1 AND salle_id=$2',
-      [req.user.id, id]
-    );
-    if (!roleRes.rows.length || roleRes.rows[0].role !== 'ADMIN') {
-      return res.status(403).json({ error: 'Seul l\'admin de la salle peut retirer un membre.' });
-    }
-
-    // Empêcher de se retirer soi-même (utiliser quitterSalle pour ça)
-    if (String(userId) === String(req.user.id)) {
-      return res.status(400).json({ error: 'Utilisez "Quitter la salle" pour vous retirer.' });
-    }
-
-    // Vérifier que la cible est bien membre
-    const membreRes = await pool.query(
-      'SELECT role FROM participations WHERE utilisateur_id=$1 AND salle_id=$2',
-      [userId, id]
-    );
-    if (!membreRes.rows.length) {
-      return res.status(404).json({ error: 'Cet utilisateur n\'est pas membre de cette salle.' });
-    }
-
-    // Empêcher de retirer un CO_ADMIN (tuteur) sans confirmation — on le permet quand même
-    await pool.query(
-      'DELETE FROM participations WHERE utilisateur_id=$1 AND salle_id=$2',
-      [userId, id]
-    );
-
-    // Récupérer nom du membre retiré pour le message de retour
-    const userRes = await pool.query(
-      'SELECT prenom, nom FROM utilisateurs WHERE id=$1', [userId]
-    );
-    const nom = userRes.rows.length
-      ? `${userRes.rows[0].prenom} ${userRes.rows[0].nom}`
-      : 'Membre';
-
-    res.json({ message: `${nom} a été retiré de la salle.`, userId: parseInt(userId) });
-  } catch (err) {
-    console.error('retirerMembre error:', err);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 };
@@ -458,9 +377,56 @@ const uploadFichier = async (req, res) => {
   }
 };
 
+// DELETE /api/salles/:id/membres/:membreId  — Admin expulse un membre
+const kickMembre = async (req, res) => {
+  try {
+    const { id, membreId } = req.params;
+
+    // Vérifier que le demandeur est ADMIN de la salle
+    const admin = await pool.query(
+      'SELECT role FROM participations WHERE utilisateur_id=$1 AND salle_id=$2',
+      [req.user.id, id]
+    );
+    if (!admin.rows.length || admin.rows[0].role !== 'ADMIN') {
+      return res.status(403).json({ error: 'Seul l\'admin peut expulser un membre' });
+    }
+
+    // Impossible de s'expulser soi-même
+    if (String(membreId) === String(req.user.id)) {
+      return res.status(400).json({ error: 'Vous ne pouvez pas vous expulser vous-même' });
+    }
+
+    // Vérifier que le membre est bien dans la salle
+    const membre = await pool.query(
+      'SELECT p.role, u.prenom, u.nom FROM participations p JOIN utilisateurs u ON p.utilisateur_id=u.id WHERE p.utilisateur_id=$1 AND p.salle_id=$2',
+      [membreId, id]
+    );
+    if (!membre.rows.length) {
+      return res.status(404).json({ error: 'Membre introuvable dans cette salle' });
+    }
+
+    const { role, prenom, nom } = membre.rows[0];
+
+    // Si c'est le tuteur (CO_ADMIN), remettre la salle en ACTIVE_SANS_TUTEUR
+    if (role === 'CO_ADMIN') {
+      await pool.query("UPDATE salles SET statut='ACTIVE_SANS_TUTEUR' WHERE id=$1", [id]);
+    }
+
+    await pool.query(
+      'DELETE FROM participations WHERE utilisateur_id=$1 AND salle_id=$2',
+      [membreId, id]
+    );
+
+    res.json({ message: `${prenom} ${nom} a été expulsé(e) de la salle`, membreId: parseInt(membreId) });
+  } catch (err) {
+    console.error('kickMembre error:', err);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+};
+
 module.exports = {
   getSalles, getMesSalles, getSalle, createSalle,
   rejoindreSalle, demanderInvitation, quitterSalle,
-  retirerMembre,
+  kickMembre,
   getParticipants, getMessages, getFichiers, uploadFichier
 };
