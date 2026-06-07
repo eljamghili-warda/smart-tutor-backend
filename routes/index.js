@@ -91,6 +91,10 @@ router.put   ('/admin/salles/:id/fermer',        authenticate, requireRole('admi
 router.get   ('/admin/seances',                  authenticate, requireRole('admin'), adminCtrl.getSeancesAdmin);
 router.get   ('/admin/revenus',                  authenticate, requireRole('admin'), paiementCtrl.getAdminRevenus);
 router.get   ('/admin/paiements',                authenticate, requireRole('admin'), paiementCtrl.getAllPaiements);
+router.get   ('/admin/examens',                  authenticate, requireRole('admin'), adminCtrl.getExamensAdmin);
+router.get   ('/admin/tuteurs/activite',         authenticate, requireRole('admin'), adminCtrl.getTuteursActivite);
+router.get   ('/admin/seances/stats',            authenticate, requireRole('admin'), adminCtrl.getSeancesStats);
+router.get   ('/admin/revenus/details',          authenticate, requireRole('admin'), adminCtrl.getRevenusDetails);
 
 // ─── Examens & Certificats ────────────────────────────────────────────────────
 const examenCtrl = require('../controllers/examen.controller');
