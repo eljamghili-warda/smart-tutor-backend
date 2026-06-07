@@ -1033,6 +1033,67 @@ const getCorrigeExamen = async (req, res) => {
   }
 };
 
+
+// ── GET /api/certificats/telecharger/:numero ────────────────────────────────
+// Téléchargement direct du PDF du certificat
+const telechargerCertificat = async (req, res) => {
+  try {
+    const { numero } = req.params;
+    const { getCertificatFilePath, genererCertificatPDF } = require('../services/certificat.service');
+
+    // Vérifier que le certificat existe en DB
+    const certRes = await pool.query(
+      `SELECT c.*, 
+              u.prenom as etudiant_prenom, u.nom as etudiant_nom,
+              e.titre as examen_titre, s.matiere,
+              s.nom as salle_nom,
+              tu.prenom as tuteur_prenom, tu.nom as tuteur_nom
+       FROM certificats c
+       JOIN utilisateurs u ON c.etudiant_id = u.id
+       JOIN examens e ON c.examen_id = e.id
+       JOIN salles s ON e.salle_id = s.id
+       JOIN utilisateurs tu ON e.tuteur_id = tu.id
+       WHERE c.numero_certificat=$1 AND c.est_valide=TRUE`,
+      [numero]
+    );
+
+    if (!certRes.rows.length) {
+      return res.status(404).json({ error: 'Certificat introuvable ou révoqué.' });
+    }
+
+    const cert = certRes.rows[0];
+    const filepath = getCertificatFilePath(numero);
+    const fs = require('fs');
+
+    // Regénérer le PDF si le fichier n'existe pas
+    if (!fs.existsSync(filepath)) {
+      await genererCertificatPDF({
+        certId:          cert.id,
+        numeroCert:      cert.numero_certificat,
+        etudiantPrenom:  cert.etudiant_prenom,
+        etudiantNom:     cert.etudiant_nom,
+        examenTitre:     cert.examen_titre,
+        salleNom:        cert.salle_nom,
+        matiere:         cert.matiere,
+        tuteurNom:       `${cert.tuteur_prenom} ${cert.tuteur_nom}`,
+        scoreObtenu:     cert.score_obtenu,
+        dateEmission:    cert.date_emission,
+      });
+    }
+
+    if (!fs.existsSync(filepath)) {
+      return res.status(404).json({ error: 'PDF non disponible.' });
+    }
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="Certificat-SmartEdu-${numero}.pdf"`);
+    res.sendFile(filepath);
+  } catch (err) {
+    console.error('telechargerCertificat error:', err);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+};
+
 module.exports = {
   createExamen, updateExamen,
   addQuestion, updateQuestion, deleteQuestion,
@@ -1041,6 +1102,7 @@ module.exports = {
   getTentativesExamen, getMesTentativesExamen,
   demarrerTentative, soumettreReponses, getResultatsTentative,
   getCorrigeExamen,
-  mesCertificats, verifierCertificat, revoquerCertificat,
+  mesCertificats,
+  telechargerCertificat, verifierCertificat, revoquerCertificat,
   getStatsExamen,
 };
