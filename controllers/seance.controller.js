@@ -311,6 +311,14 @@ const annulerSeance = async (req, res) => {
       }
     }
 
+    // Email annulation au tuteur (toujours, qu'il y ait remboursement ou non)
+    emailService.sendAnnulationTuteur({
+      to:  req.user.email,
+      nom: `${req.user.prenom} ${req.user.nom}`,
+      seance: { titre: seance.titre, date_debut: seance.date_debut },
+      motif:  'Vous avez annulé cette séance manuellement.',
+    }).catch(console.error);
+
     await client.query('COMMIT');
 
     res.json({
@@ -426,24 +434,45 @@ const annulerSeancesNonPayees = async () => {
   }
 };
 
-// ── CRON : règle des 5 minutes (appel vidéo) ─────────────────────────────────
+// ── CRON : règle des 15% (appel vidéo) ───────────────────────────────────────
 // ÉTAPE 8 → EN_COURS quand appel lancé
-// ÉTAPE 9 → REALISEE si appel terminé dans la fenêtre, ANNULEE si trop tôt
-const FENETRE_MINUTES = 15;
+// ÉTAPE 9 → REALISEE si appel terminé après (fin - 15%), ANNULEE si trop tôt
 
 const verifierSeancesExpirees = async () => {
   try {
-    // 1. Séances PLANIFIEE sans appel lancé 15 min après le début → ANNULEE + remboursement
+    // 1. Séances CONFIRMEE/PLANIFIEE/EN_ATTENTE_PAIEMENT sans appel lancé
+    //    après (date_debut + 15% de la durée) → ANNULEE automatique + remboursement
+    //
+    //    Règle : limite_debut = date_debut + duree*0.15
+    //    Si NOW() > limite_debut ET aucun appel lancé → ANNULEE
     const annulees = await pool.query(
       `UPDATE seances SET statut='ANNULEE'
-       WHERE statut='PLANIFIEE'
+       WHERE statut IN ('PLANIFIEE','CONFIRMEE','EN_ATTENTE_PAIEMENT')
          AND session_appel_id IS NULL
-         AND NOW() > date_debut + INTERVAL '15 minutes'
-       RETURNING id, titre, salle_id, tuteur_id, date_debut, statut_paiement`
+         AND NOW() > date_debut + (duree * 0.15 * INTERVAL '1 minute')
+       RETURNING id, titre, salle_id, tuteur_id, date_debut, duree, statut_paiement`
     );
 
     for (const seance of annulees.rows) {
-      console.log(`🔄 Séance ${seance.id} "${seance.titre}" non lancée +15min → ANNULEE`);
+      const marge15 = Math.round(seance.duree * 0.15);
+      console.log(`🔄 Séance ${seance.id} "${seance.titre}" — aucun appel lancé après ${marge15} min → ANNULEE`);
+
+      // Récupérer infos tuteur pour lui envoyer l'email
+      try {
+        const tuteurRes = await pool.query(
+          `SELECT u.email, u.prenom, u.nom
+           FROM utilisateurs u WHERE u.id = $1`, [seance.tuteur_id]
+        );
+        if (tuteurRes.rows.length) {
+          const t = tuteurRes.rows[0];
+          emailService.sendAnnulationTuteur({
+            to:  t.email,
+            nom: `${t.prenom} ${t.nom}`,
+            seance: { titre: seance.titre, date_debut: seance.date_debut },
+            motif:  `Aucun appel n'a été lancé dans les ${marge15} premières minutes de la séance.`,
+          }).catch(console.error);
+        }
+      } catch (e) { console.error('Email tuteur annulation:', e.message); }
 
       // Si la séance était payée → rembourser automatiquement + email
       if (['PAYE', 'EN_ATTENTE_LIBERATION'].includes(seance.statut_paiement)) {
@@ -480,6 +509,9 @@ const verifierSeancesExpirees = async () => {
     }
 
     // 2. Séances EN_COURS dont l'appel est terminé → REALISEE ou ANNULEE
+    //    Règle : limite_fin = date_fin - duree*0.15
+    //    Si date_fin_appel < limite_fin → ANNULEE (terminé trop tôt)
+    //    Sinon → REALISEE
     const sesTerminees = await pool.query(
       `SELECT s.id AS seance_id, s.date_debut, s.duree, sa.date_fin
        FROM seances s
@@ -489,19 +521,100 @@ const verifierSeancesExpirees = async () => {
     );
 
     for (const row of sesTerminees.rows) {
-      const dateFinPrevue  = new Date(new Date(row.date_debut).getTime() + row.duree * 60_000);
+      const dureeMs        = row.duree * 60_000;
+      const marge15Ms      = dureeMs * 0.15;
+      const dateFinPrevue  = new Date(new Date(row.date_debut).getTime() + dureeMs);
+      const limiteFin      = new Date(dateFinPrevue.getTime() - marge15Ms);
       const dateFinAppel   = new Date(row.date_fin);
-      const termineTropTot = dateFinAppel < new Date(dateFinPrevue.getTime() - FENETRE_MINUTES * 60_000);
+
+      const termineTropTot = dateFinAppel < limiteFin;
       const statut         = termineTropTot ? 'ANNULEE' : 'REALISEE';
 
-      await pool.query(
-        `UPDATE seances SET statut=$1 WHERE id=$2 AND statut='EN_COURS'`,
+      const updated = await pool.query(
+        `UPDATE seances SET statut=$1 WHERE id=$2 AND statut='EN_COURS' RETURNING *`,
         [statut, row.seance_id]
       );
-      console.log(`${termineTropTot ? '⚠️' : '✅'} Séance ${row.seance_id} → ${statut}`);
+      if (!updated.rows.length) continue;
+
+      const marge15Min = Math.round(row.duree * 0.15);
+      console.log(`${termineTropTot ? '⚠️' : '✅'} Séance ${row.seance_id} → ${statut} (marge 15% = ${marge15Min} min)`);
 
       if (statut === 'REALISEE') {
+        // Passer le paiement COMPLETE → EN_ATTENTE_LIBERATION d'abord si nécessaire
+        await pool.query(
+          `UPDATE paiements SET statut='EN_ATTENTE_LIBERATION'
+           WHERE seance_id=$1 AND statut='COMPLETE'`,
+          [row.seance_id]
+        ).catch(console.error);
+        await pool.query(
+          `UPDATE seances SET statut_paiement='EN_ATTENTE_LIBERATION'
+           WHERE id=$1 AND statut_paiement='PAYE'`,
+          [row.seance_id]
+        ).catch(console.error);
         libererFonds(row.seance_id).catch(console.error);
+
+      } else {
+        // ANNULEE automatique : rembourser + email (même logique qu'annulation manuelle)
+        try {
+          const paiementRes = await pool.query(
+            `SELECT p.id, p.montant_total, p.reference,
+                    u.email  as payeur_email,
+                    u.prenom as payeur_prenom,
+                    u.nom    as payeur_nom,
+                    s.titre  as seance_titre,
+                    s.date_debut,
+                    s.statut_paiement,
+                    ut.email  as tuteur_email,
+                    ut.prenom as tuteur_prenom,
+                    ut.nom    as tuteur_nom
+             FROM paiements p
+             JOIN seances s ON p.seance_id = s.id
+             JOIN utilisateurs u ON p.payeur_id = u.id
+             LEFT JOIN utilisateurs ut ON p.tuteur_id = ut.id
+             WHERE p.seance_id=$1
+               AND p.statut IN ('COMPLETE','EN_ATTENTE_LIBERATION')
+             LIMIT 1`,
+            [row.seance_id]
+          );
+
+          if (paiementRes.rows.length) {
+            const p = paiementRes.rows[0];
+
+            // Rembourser le paiement
+            await pool.query(
+              `UPDATE paiements SET statut='REMBOURSE', date_remboursement=NOW() WHERE id=$1`,
+              [p.id]
+            );
+            await pool.query(
+              `UPDATE seances SET statut_paiement='REMBOURSE' WHERE id=$1`,
+              [row.seance_id]
+            );
+
+            // Email remboursement à l'admin de la salle (payeur)
+            if (p.payeur_email) {
+              emailService.sendConfirmationRemboursement({
+                to:  p.payeur_email,
+                nom: `${p.payeur_prenom} ${p.payeur_nom}`,
+                seance:   { titre: p.seance_titre, date_debut: p.date_debut },
+                paiement: { montant_total: p.montant_total, reference: p.reference },
+              }).catch(console.error);
+            }
+
+            // Email annulation au tuteur
+            if (p.tuteur_email) {
+              emailService.sendAnnulationTuteur({
+                to:  p.tuteur_email,
+                nom: `${p.tuteur_prenom} ${p.tuteur_nom}`,
+                seance: { titre: p.seance_titre, date_debut: p.date_debut },
+                motif: `L'appel a été terminé trop tôt (plus de ${marge15Min} min avant la fin prévue).`,
+              }).catch(console.error);
+            }
+
+            console.log(`💸 Remboursement auto — séance ${row.seance_id} — ${p.montant_total} DH`);
+          }
+        } catch (remboursErr) {
+          console.error(`Erreur remboursement auto séance ${row.seance_id}:`, remboursErr);
+        }
       }
     }
   } catch (err) {
