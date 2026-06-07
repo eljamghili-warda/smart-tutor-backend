@@ -117,6 +117,7 @@ router.get ('/examens/:id/stats',                 authenticate, examenCtrl.getSt
 router.post('/examens/:id/tentatives',            authenticate, examenCtrl.demarrerTentative);
 router.get ('/examens/:id/tentatives',            authenticate, examenCtrl.getTentativesExamen);
 router.get ('/examens/:id/mes-tentatives',        authenticate, examenCtrl.getMesTentativesExamen);
+router.get ('/examens/:id/corrige',              authenticate, examenCtrl.getCorrigeExamen);
 router.put ('/tentatives/:tentativeId/soumettre', authenticate, examenCtrl.soumettreReponses);
 router.get ('/tentatives/:tentativeId/resultats', authenticate, examenCtrl.getResultatsTentative);
 

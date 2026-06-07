@@ -952,6 +952,87 @@ const getStatsExamen = async (req, res) => {
   }
 };
 
+
+// ══════════════════════════════════════════════════════════════════
+// Corrigé général d'un examen (sans tentative requise)
+// GET /api/examens/:id/corrige
+// Accessible à tout étudiant de la salle APRÈS date_affichage_resultats
+// ══════════════════════════════════════════════════════════════════
+const getCorrigeExamen = async (req, res) => {
+  const { id } = req.params;
+  try {
+    // Récupérer l'examen
+    const examRes = await pool.query(
+      `SELECT e.*, s.nom as salle_nom
+       FROM examens e
+       JOIN salles s ON e.salle_id = s.id
+       WHERE e.id=$1`,
+      [id]
+    );
+    if (!examRes.rows.length)
+      return res.status(404).json({ error: 'Examen introuvable.' });
+
+    const examen = examRes.rows[0];
+
+    // Vérifier que la date d'affichage est passée
+    const dateAffichage = examen.date_affichage_resultats
+      ? new Date(examen.date_affichage_resultats) : null;
+
+    if (dateAffichage && new Date() < dateAffichage) {
+      return res.status(403).json({
+        error: 'Corrigé pas encore disponible.',
+        dateAffichage: examen.date_affichage_resultats,
+      });
+    }
+
+    // Récupérer ma tentative si elle existe
+    const tentativeRes = await pool.query(
+      `SELECT * FROM tentatives_examen
+       WHERE examen_id=$1 AND etudiant_id=$2
+       ORDER BY started_at DESC LIMIT 1`,
+      [id, req.user.id]
+    );
+    const tentative = tentativeRes.rows[0] || null;
+
+    // Récupérer le corrigé complet (toutes les questions + bonnes réponses)
+    const questionsRes = await pool.query(
+      `SELECT q.id, q.texte, q.type, q.points, q.ordre,
+              json_agg(
+                json_build_object(
+                  'id', r.id,
+                  'texte', r.texte,
+                  'est_correcte', r.est_correcte,
+                  'ordre', r.ordre
+                ) ORDER BY r.ordre
+              ) as toutes_reponses,
+              ${tentative ? `
+              (SELECT re.reponse_id FROM reponses_etudiant re
+               WHERE re.tentative_id=$2 AND re.question_id=q.id LIMIT 1) as reponse_choisie,
+              (SELECT re.est_correcte FROM reponses_etudiant re
+               WHERE re.tentative_id=$2 AND re.question_id=q.id LIMIT 1) as est_correcte
+              ` : `
+              NULL::bigint as reponse_choisie,
+              NULL::boolean as est_correcte
+              `}
+       FROM questions_examen q
+       LEFT JOIN reponses_question r ON r.question_id=q.id
+       WHERE q.examen_id=$1
+       GROUP BY q.id ORDER BY q.ordre`,
+      tentative ? [id, tentative.id] : [id]
+    );
+
+    res.json({
+      examen,
+      tentative,
+      questions: questionsRes.rows,
+      aPasse: !!tentative,
+    });
+  } catch (err) {
+    console.error('getCorrigeExamen error:', err);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+};
+
 module.exports = {
   createExamen, updateExamen,
   addQuestion, updateQuestion, deleteQuestion,
@@ -959,6 +1040,7 @@ module.exports = {
   getExamensSalle, getMesExamens, getMesExamensEtudiant, getExamen,
   getTentativesExamen, getMesTentativesExamen,
   demarrerTentative, soumettreReponses, getResultatsTentative,
+  getCorrigeExamen,
   mesCertificats, verifierCertificat, revoquerCertificat,
   getStatsExamen,
 };
