@@ -652,8 +652,19 @@ const soumettreReponses = async (req, res) => {
 
     await client.query('COMMIT');
 
-    // ─── Certificat automatique si réussi (HORS transaction principale) ────
+    // ─── APRÈS COMMIT : gérer certificat + emails ────────────────────────────
     let certificat = null;
+
+    const maintenant      = new Date();
+    const dateAffichage   = tentative.date_affichage_resultats
+      ? new Date(tentative.date_affichage_resultats) : null;
+    const resultatVisible = !dateAffichage || maintenant >= dateAffichage;
+
+    // S'assurer que la colonne email_envoye existe
+    await pool.query(
+      `ALTER TABLE tentatives_examen ADD COLUMN IF NOT EXISTS email_envoye BOOLEAN DEFAULT FALSE`
+    ).catch(() => {});
+
     if (reussi) {
       try {
         // Vérifier si certificat déjà existant
@@ -663,13 +674,12 @@ const soumettreReponses = async (req, res) => {
         );
 
         if (certExist.rows.length) {
-          // Certificat déjà créé — le retourner
           certificat = certExist.rows[0];
-        } else {
-          // Générer un numéro unique garanti avec timestamp + random
-          const year = new Date().getFullYear();
-          const ts   = Date.now().toString().slice(-6);
-          const rand = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+        } else if (resultatVisible) {
+          // Résultat visible immédiatement → générer certificat maintenant
+          const year       = new Date().getFullYear();
+          const ts         = Date.now().toString().slice(-6);
+          const rand       = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
           const numeroCert = `CERT-${year}-${ts}${rand}`;
 
           const certRes = await pool.query(
@@ -683,81 +693,73 @@ const soumettreReponses = async (req, res) => {
           );
           certificat = certRes.rows[0];
 
-          // ── Emails : envoyer maintenant OU différer selon date_affichage ──
+          // Envoyer email immédiatement
           const etudiantRes = await pool.query(
             `SELECT * FROM utilisateurs WHERE id=$1`, [req.user.id]
           );
           const etudiant = etudiantRes.rows[0];
 
-          const maintenant2      = new Date();
-          const dateAffich2      = tentative.date_affichage_resultats
-            ? new Date(tentative.date_affichage_resultats) : null;
-          const envoyerMaintenant = !dateAffich2 || maintenant2 >= dateAffich2;
+          emailService.sendCertificatEmail({
+            to:          etudiant.email,
+            nom:         `${etudiant.prenom} ${etudiant.nom}`,
+            examenTitre: tentative.examen_titre,
+            sallenom:    tentative.salle_nom,
+            numeroCert:  certificat.numero_certificat,
+            score:       pourcentage.toFixed(1),
+            tuteurNom:   `${tentative.tuteur_prenom} ${tentative.tuteur_nom}`,
+          }).catch(console.error);
 
-          if (envoyerMaintenant) {
-            // Pas de date d'affichage ou date déjà passée → email immédiat
-            emailService.sendCertificatEmail({
-              to: etudiant.email,
-              nom: `${etudiant.prenom} ${etudiant.nom}`,
-              examenTitre: tentative.examen_titre,
-              sallenom: tentative.salle_nom,
-              numeroCert: certificat.numero_certificat,
-              score: pourcentage.toFixed(1),
-              tuteurNom: `${tentative.tuteur_prenom} ${tentative.tuteur_nom}`,
-            }).catch(console.error);
+          emailService.sendNotifTuteurCertificat({
+            to:          tentative.tuteur_email,
+            tuteurNom:   `${tentative.tuteur_prenom} ${tentative.tuteur_nom}`,
+            etudiantNom: `${etudiant.prenom} ${etudiant.nom}`,
+            examenTitre: tentative.examen_titre,
+            score:       pourcentage.toFixed(1),
+            numeroCert:  certificat.numero_certificat,
+          }).catch(console.error);
 
-            emailService.sendNotifTuteurCertificat({
-              to: tentative.tuteur_email,
-              tuteurNom: `${tentative.tuteur_prenom} ${tentative.tuteur_nom}`,
-              etudiantNom: `${etudiant.prenom} ${etudiant.nom}`,
-              examenTitre: tentative.examen_titre,
-              score: pourcentage.toFixed(1),
-              numeroCert: certificat.numero_certificat,
-            }).catch(console.error);
+          // Marquer email comme envoyé
+          await pool.query(
+            `UPDATE tentatives_examen SET email_envoye = TRUE WHERE id = $1`, [tentativeId]
+          ).catch(console.error);
 
-            // Marquer l'email comme envoyé
-            await pool.query(
-              `ALTER TABLE tentatives_examen ADD COLUMN IF NOT EXISTS email_envoye BOOLEAN DEFAULT FALSE`
-            ).catch(() => {});
-            await pool.query(
-              `UPDATE tentatives_examen SET email_envoye = TRUE WHERE id = $1`,
-              [tentativeId]
-            ).catch(() => {});
-
-          } else {
-            // Date d'affichage dans le futur → différer l'email (cron l'enverra)
-            console.log(`📧 Email différé jusqu'au ${dateAffich2.toISOString()} pour tentative ${tentativeId}`);
-            await pool.query(
-              `ALTER TABLE tentatives_examen ADD COLUMN IF NOT EXISTS email_envoye BOOLEAN DEFAULT FALSE`
-            ).catch(() => {});
-            await pool.query(
-              `UPDATE tentatives_examen SET email_envoye = FALSE WHERE id = $1`,
-              [tentativeId]
-            ).catch(() => {});
-          }
-
-          // WebSocket (toujours immédiat — juste pour notifier que l'examen est terminé)
-          const io = req.app.get('io');
-          if (io) {
-            io.to(`user:${req.user.id}`).emit('certificat:emis', {
-              certificat,
-              examenTitre: tentative.examen_titre,
-              score: pourcentage.toFixed(1),
-              affichageResultats: dateAffich2 ? dateAffich2.toISOString() : null,
-            });
-          }
+        } else {
+          // Date d'affichage dans le futur → tout différer (certificat + email)
+          // Le cron va créer le certificat ET envoyer l'email à la date d'affichage
+          console.log(`📧 Certificat + email différés jusqu'au ${dateAffichage.toISOString()} (tentative ${tentativeId})`);
+          await pool.query(
+            `UPDATE tentatives_examen SET email_envoye = FALSE WHERE id = $1`, [tentativeId]
+          ).catch(console.error);
         }
+
+        // WebSocket (toujours immédiat)
+        const io = req.app.get('io');
+        if (io) {
+          io.to(`user:${req.user.id}`).emit('certificat:emis', {
+            certificat,
+            examenTitre:        tentative.examen_titre,
+            score:              pourcentage.toFixed(1),
+            affichageResultats: dateAffichage ? dateAffichage.toISOString() : null,
+            resultatVisible,
+          });
+        }
+
       } catch (certErr) {
-        // Ne pas bloquer la réponse si le certificat échoue
         console.error('Certificat error (non bloquant):', certErr.message);
       }
+
+    } else {
+      // ECHOUE → marquer email_envoye=FALSE pour que le cron l'envoie à la date d'affichage
+      if (!resultatVisible) {
+        await pool.query(
+          `UPDATE tentatives_examen SET email_envoye = FALSE WHERE id = $1`, [tentativeId]
+        ).catch(console.error);
+      }
+      // Si résultat visible immédiatement → pas d'email pour ECHOUE (pas de certificat)
     }
 
     // Déterminer si les résultats sont affichables maintenant
-    const maintenant = new Date();
-    const dateAffichage = tentative.date_affichage_resultats
-      ? new Date(tentative.date_affichage_resultats) : null;
-    const resultatsVisibles = !dateAffichage || maintenant >= dateAffichage;
+    const resultatsVisibles2 = resultatVisible;
 
     res.json({
       statut,
@@ -767,7 +769,7 @@ const soumettreReponses = async (req, res) => {
       notePassage: tentative.note_passage,
       reussi,
       certificat,
-      resultatsVisibles,
+      resultatsVisibles: resultatsVisibles2,
       dateAffichageResultats: tentative.date_affichage_resultats,
     });
   } catch (err) {

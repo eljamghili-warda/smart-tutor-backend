@@ -8,6 +8,7 @@ const fileUpload = require('express-fileupload');
 const bodyParser = require('body-parser');
 const path       = require('path');
 const fs         = require('fs');
+const { pool }   = require('./config/db');
 
 const routes      = require('./routes/index');
 const setupSocket = require('./socket/index');
@@ -94,10 +95,14 @@ server.listen(PORT, () => {
   // 4. Cron : envoyer les emails de résultats différés — toutes les 5 minutes
   const envoyerEmailsResultatsDifferes = async () => {
     try {
-      // Ajouter colonne si elle n'existe pas encore
+      // Ajouter colonne si elle n'existe pas encore + corriger les NULL
       await pool.query(`
         ALTER TABLE tentatives_examen 
         ADD COLUMN IF NOT EXISTS email_envoye BOOLEAN DEFAULT FALSE
+      `).catch(() => {});
+      // Mettre FALSE là où c'est NULL (tentatives créées avant l'ajout de la colonne)
+      await pool.query(`
+        UPDATE tentatives_examen SET email_envoye = FALSE WHERE email_envoye IS NULL
       `).catch(() => {});
 
       // Trouver toutes les tentatives dont l'email n'a pas été envoyé
@@ -118,7 +123,7 @@ server.listen(PORT, () => {
         JOIN utilisateurs ue ON t.etudiant_id = ue.id
         JOIN utilisateurs ut ON e.tuteur_id = ut.id
         LEFT JOIN certificats c ON c.examen_id = t.examen_id AND c.etudiant_id = t.etudiant_id
-        WHERE t.email_envoye = FALSE
+        WHERE (t.email_envoye = FALSE OR t.email_envoye IS NULL)
           AND t.statut IN ('REUSSI', 'ECHOUE')
           AND t.submitted_at IS NOT NULL
           AND (
@@ -129,18 +134,50 @@ server.listen(PORT, () => {
 
       if (res.rows.length > 0) {
         console.log(`📧 Cron emails : ${res.rows.length} email(s) à envoyer`);
+        res.rows.forEach(r => console.log(`  → tentative ${r.id} | ${r.statut} | etudiant: ${r.etudiant_email} | date_affichage: ${r.date_affichage_resultats}`));
+      } else {
+        // Log discret pour savoir que le cron tourne
+        const check = await pool.query(
+          `SELECT COUNT(*) as total,
+                  COUNT(*) FILTER (WHERE email_envoye = TRUE) as envoyes,
+                  COUNT(*) FILTER (WHERE email_envoye = FALSE OR email_envoye IS NULL) as non_envoyes
+           FROM tentatives_examen WHERE statut IN ('REUSSI','ECHOUE')`
+        );
+        const { total, envoyes, non_envoyes } = check.rows[0];
+        console.log(`📧 Cron emails : 0 à envoyer maintenant (total: ${total}, envoyés: ${envoyes}, en attente: ${non_envoyes})`);
       }
 
       for (const row of res.rows) {
         try {
-          if (row.statut === 'REUSSI' && row.numero_certificat) {
+          if (row.statut === 'REUSSI') {
+            // Créer le certificat s'il n'existe pas encore
+            let numeroCert = row.numero_certificat;
+            if (!numeroCert) {
+              const year = new Date().getFullYear();
+              const ts   = Date.now().toString().slice(-6);
+              const rand = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+              numeroCert = `CERT-${year}-${ts}${rand}`;
+              await pool.query(
+                `INSERT INTO certificats (etudiant_id, examen_id, tentative_id, numero_certificat, score_obtenu)
+                 VALUES ($1,$2,$3,$4,$5)
+                 ON CONFLICT (etudiant_id, examen_id) DO UPDATE SET score_obtenu=EXCLUDED.score_obtenu`,
+                [row.etudiant_id, row.examen_id, row.id, numeroCert, row.pourcentage]
+              );
+              // Récupérer le vrai numéro (en cas de conflict)
+              const certRow = await pool.query(
+                `SELECT numero_certificat FROM certificats WHERE etudiant_id=$1 AND examen_id=$2`,
+                [row.etudiant_id, row.examen_id]
+              );
+              numeroCert = certRow.rows[0]?.numero_certificat || numeroCert;
+            }
+
             // Email certificat à l'étudiant
             await emailService.sendCertificatEmail({
               to:          row.etudiant_email,
               nom:         `${row.etudiant_prenom} ${row.etudiant_nom}`,
               examenTitre: row.examen_titre,
               sallenom:    row.salle_nom,
-              numeroCert:  row.numero_certificat,
+              numeroCert,
               score:       parseFloat(row.pourcentage).toFixed(1),
               tuteurNom:   `${row.tuteur_prenom} ${row.tuteur_nom}`,
             });
@@ -151,23 +188,10 @@ server.listen(PORT, () => {
               etudiantNom: `${row.etudiant_prenom} ${row.etudiant_nom}`,
               examenTitre: row.examen_titre,
               score:       parseFloat(row.pourcentage).toFixed(1),
-              numeroCert:  row.numero_certificat,
-            });
-          } else if (row.statut === 'ECHOUE') {
-            // Email résultat échoué à l'étudiant
-            await emailService.sendResultatExamenEmail({
-              to:          row.etudiant_email,
-              nom:         `${row.etudiant_prenom} ${row.etudiant_nom}`,
-              examenTitre: row.examen_titre,
-              sallenom:    row.salle_nom,
-              score:       parseFloat(row.pourcentage).toFixed(1),
-              notePassage: row.note_passage,
-              reussi:      false,
-              tuteurNom:   `${row.tuteur_prenom} ${row.tuteur_nom}`,
-            }).catch(() => {
-              // Si sendResultatExamenEmail n'existe pas, on ignore silencieusement
+              numeroCert,
             });
           }
+          // Pour ECHOUE → pas d'email (pas de certificat à envoyer)
 
           // Marquer comme envoyé
           await pool.query(
@@ -186,7 +210,7 @@ server.listen(PORT, () => {
     }
   };
 
-  // Lancer immédiatement au démarrage puis toutes les 5 minutes
+  // Lancer immédiatement au démarrage puis toutes les 1 minute
   envoyerEmailsResultatsDifferes();
-  setInterval(envoyerEmailsResultatsDifferes, 5 * 60 * 1000);
+  setInterval(envoyerEmailsResultatsDifferes, 1 * 60 * 1000);
 });

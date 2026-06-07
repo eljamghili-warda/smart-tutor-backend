@@ -178,19 +178,21 @@ const setupSocket = (io) => {
       }
       const sessionId = uuidv4();
       try {
-        // Si seanceId non fourni → chercher automatiquement une séance ±5min
+        // Si seanceId non fourni → chercher automatiquement une séance dans la fenêtre 15%
         let resolvedSeanceId = seanceId || null;
         if (!resolvedSeanceId) {
-         const seanceMatch = await pool.query(
-  `SELECT id FROM seances
-   WHERE salle_id = $1
-     AND statut IN ('EN_ATTENTE_PAIEMENT', 'CONFIRMEE')   // ← modifié
-     AND date_debut BETWEEN NOW() - INTERVAL '5 minutes'
-                      AND NOW() + INTERVAL '5 minutes'
-   ORDER BY ABS(EXTRACT(EPOCH FROM (date_debut - NOW())))
-   LIMIT 1`,
-  [salleId]
-);
+          const seanceMatch = await pool.query(
+            `SELECT id, date_debut, duree FROM seances
+             WHERE salle_id = $1
+               AND statut IN ('EN_ATTENTE_PAIEMENT', 'CONFIRMEE')
+               AND NOW() BETWEEN
+                 date_debut - (duree * 0.15 * INTERVAL '1 minute')
+               AND
+                 date_debut + (duree * INTERVAL '1 minute') + (duree * 0.15 * INTERVAL '1 minute')
+             ORDER BY ABS(EXTRACT(EPOCH FROM (date_debut - NOW())))
+             LIMIT 1`,
+            [salleId]
+          );
           if (seanceMatch.rows.length > 0) {
             resolvedSeanceId = seanceMatch.rows[0].id;
             console.log(`📅 Séance auto-détectée: ${resolvedSeanceId}`);
@@ -214,51 +216,52 @@ const setupSocket = (io) => {
             const dateDebut   = new Date(date_debut);
             const dateFin     = new Date(dateDebut.getTime() + duree * 60 * 1000);
             const now         = new Date();
-            const fenetreMs   = 5 * 60 * 1000; // 5 minutes en ms
+            // 15% de la durée de la séance
+            const fenetreDebutMs = duree * 0.15 * 60 * 1000;
+            const fenetreFinMs   = duree * 0.15 * 60 * 1000;
 
-            const debutValide = now >= new Date(dateDebut.getTime() - fenetreMs);
-            const finValide   = now <= new Date(dateFin.getTime() + fenetreMs);
+            // L'appel doit être lancé dans les 15% du début
+            const debutValide = now >= new Date(dateDebut.getTime() - fenetreDebutMs)
+                             && now <= new Date(dateDebut.getTime() + fenetreDebutMs);
+            // ET avant la fin + 15%
+            const finValide   = now <= new Date(dateFin.getTime() + fenetreFinMs);
 
             if (!debutValide || !finValide) {
-              // L'appel est lancé hors de la fenêtre valide → séance ANNULEE
               await pool.query(
-  `UPDATE seances SET statut='ANNULEE' 
-   WHERE id=$1 AND statut IN ('EN_ATTENTE_PAIEMENT', 'CONFIRMEE')`,
-  [resolvedSeanceId]
-);
+                `UPDATE seances SET statut='ANNULEE'
+                 WHERE id=$1 AND statut IN ('EN_ATTENTE_PAIEMENT', 'CONFIRMEE')`,
+                [resolvedSeanceId]
+              );
               await pool.query(
                 `UPDATE sessions_appel SET actif=FALSE, date_fin=NOW(), duree_reelle_minutes=0
                  WHERE id=$1`,
                 [sessionId]
               );
               io.to(`salle:${salleId}`).emit('seance:updated', {
-                seanceId: resolvedSeanceId,
-                statut: 'ANNULEE',
+                seanceId: resolvedSeanceId, statut: 'ANNULEE',
               });
-              const minutesAvant = Math.round((dateDebut - now) / 60000);
-              const minutesApres = Math.round((now - dateFin) / 60000);
+              const fenetre15 = Math.round(duree * 0.15);
               const raison = !debutValide
-                ? `L'appel a été lancé trop tard (plus de 5 min après la fin de la séance)`
-                : `L'appel a été lancé trop tôt (${minutesAvant} min avant le début)`;
+                ? `L'appel doit être lancé dans les ${fenetre15} minutes autour du début de la séance`
+                : `La séance est déjà terminée (plus de ${fenetre15} min après la fin)`;
               socket.emit('error', { message: `Séance annulée : ${raison}.` });
               io.to(`salle:${salleId}`).emit('call:started', {
-                sessionId,
-                salleId,
+                sessionId, salleId,
                 initiateur: socket.user.id,
                 initiateurNom: `${socket.user.prenom} ${socket.user.nom}`,
                 initiateurRole: socket.roleSalle,
                 seanceAnnulee: true,
               });
-              console.log(`⚠️ Séance ${resolvedSeanceId} ANNULEE — appel hors fenêtre`);
+              console.log(`⚠️ Séance ${resolvedSeanceId} ANNULEE — appel hors fenêtre 15%`);
               return;
             }
           }
 
          await pool.query(
-  `UPDATE seances SET statut='EN_COURS', session_appel_id=$1
-   WHERE id=$2 AND statut IN ('EN_ATTENTE_PAIEMENT', 'CONFIRMEE')`,
-  [sessionId, resolvedSeanceId]
-);
+          `UPDATE seances SET statut='EN_COURS', session_appel_id=$1
+           WHERE id=$2 AND statut IN ('EN_ATTENTE_PAIEMENT', 'CONFIRMEE')`,
+          [sessionId, resolvedSeanceId]
+        );
           io.to(`salle:${salleId}`).emit('seance:updated', {
             seanceId: resolvedSeanceId,
             statut: 'EN_COURS',
@@ -324,18 +327,19 @@ const setupSocket = (io) => {
           const dateDebutSeance = new Date(date_debut);
           const dateFinSeance   = new Date(dateDebutSeance.getTime() + duree * 60 * 1000);
           const now             = new Date();
-          const fenetreMs       = 5 * 60 * 1000; // 5 minutes en ms
+          // 15% de la durée = fenêtre acceptable de fin anticipée
+          const fenetreFinMs    = duree * 0.15 * 60 * 1000;
 
-          // Règle : si l'appel se termine PLUS DE 5 MIN AVANT la fin prévue → ANNULEE
-          // (l'appel a été trop court, la séance n'a pas pu être réalisée correctement)
-          const termineTropTot = now < new Date(dateFinSeance.getTime() - fenetreMs);
+          // ANNULEE si l'appel se termine AVANT (fin_seance - 15% de la durée)
+          const termineTropTot = now < new Date(dateFinSeance.getTime() - fenetreFinMs);
 
           if (termineTropTot) {
             statutFinal = 'ANNULEE';
             const minutesManquantes = Math.round((dateFinSeance - now) / 60000);
-            console.log(`⚠️ Séance ${seanceId} ANNULEE — appel terminé ${minutesManquantes} min trop tôt`);
+            const fenetre15 = Math.round(duree * 0.15);
+            console.log(`⚠️ Séance ${seanceId} ANNULEE — appel terminé ${minutesManquantes} min trop tôt (fenêtre: ${fenetre15} min)`);
           } else {
-            console.log(`✅ Séance ${seanceId} → REALISEE (appel terminé dans la fenêtre valide)`);
+            console.log(`✅ Séance ${seanceId} → REALISEE`);
           }
         }
 

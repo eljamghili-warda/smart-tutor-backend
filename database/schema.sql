@@ -544,7 +544,13 @@ ALTER TABLE seances
   CHECK (statut_paiement IN ('EN_ATTENTE','PAYE','REMBOURSE','EN_ATTENTE_LIBERATION','LIBERE'));
   ALTER TABLE seances
   ALTER COLUMN statut_paiement TYPE VARCHAR(30);
+-- Colonne pour tracker si l'email a été envoyé (pour les tentatives REUSSI et ECHOUE)
+ALTER TABLE tentatives_examen
+  ADD COLUMN IF NOT EXISTS email_envoye BOOLEAN NOT NULL DEFAULT FALSE;
 
+-- Colonne pour tracker si l'email certificat a été envoyé
+ALTER TABLE certificats
+  ADD COLUMN IF NOT EXISTS email_envoye BOOLEAN NOT NULL DEFAULT FALSE;
 -- Admin account initial
 INSERT INTO utilisateurs (prenom, nom, email, mot_de_passe, role)
 VALUES ('Admin', 'General', 'admin@smarttutor.com', 'admin123', 'admin');
