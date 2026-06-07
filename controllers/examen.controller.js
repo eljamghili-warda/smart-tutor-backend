@@ -522,17 +522,7 @@ const demarrerTentative = async (req, res) => {
     if (reussiRes.rows.length)
       return res.status(400).json({ error: 'Vous avez déjà réussi cet examen.' });
 
-    // Vérifier tentatives max
-    if (examen.max_tentatives) {
-      const countRes = await client.query(
-        `SELECT COUNT(*) FROM tentatives_examen WHERE examen_id=$1 AND etudiant_id=$2`,
-        [id, req.user.id]
-      );
-      if (parseInt(countRes.rows[0].count) >= examen.max_tentatives)
-        return res.status(400).json({
-          error: `Nombre maximum de tentatives atteint (${examen.max_tentatives}).`
-        });
-    }
+    // Pas de limite de tentatives — l'étudiant a une seule passe (déjà réussi vérifié plus haut)
 
     // Calculer score_max
     const scoreRes = await client.query(
