@@ -8,11 +8,14 @@ const emailService = require('../services/email.service');
 const createExamen = async (req, res) => {
   const {
     salleId, titre, description,
-    notePassage = 70, dureeMinutes = 30, maxTentatives,
+    notePassage = 70, dureeMinutes = 30,
     dateDebut, dateLimite, dateAffichageResultats,
     modeAffichage = 'UNE_PAR_UNE',
     melangerQuestions = true, melangerReponses = true,
   } = req.body;
+
+  // Tentatives fixées à 1 — une seule chance par étudiant
+  const maxTentatives = 1;
 
   if (!titre?.trim()) return res.status(400).json({ error: 'Le titre est obligatoire.' });
   if (!salleId)       return res.status(400).json({ error: 'La salle est obligatoire.' });
@@ -52,7 +55,7 @@ const createExamen = async (req, res) => {
 const updateExamen = async (req, res) => {
   const { id } = req.params;
   const {
-    titre, description, notePassage, dureeMinutes, maxTentatives,
+    titre, description, notePassage, dureeMinutes,
     dateDebut, dateLimite, dateAffichageResultats,
     modeAffichage, melangerQuestions, melangerReponses,
   } = req.body;
@@ -65,11 +68,11 @@ const updateExamen = async (req, res) => {
 
     const { rows } = await pool.query(
       `UPDATE examens SET
-         titre=$1, description=$2, note_passage=$3, duree_minutes=$4, max_tentatives=$5,
-         date_debut=$6, date_limite=$7, date_affichage_resultats=$8,
-         mode_affichage=$9, melanger_questions=$10, melanger_reponses=$11
-       WHERE id=$12 RETURNING *`,
-      [titre, description, notePassage, dureeMinutes, maxTentatives || null,
+         titre=$1, description=$2, note_passage=$3, duree_minutes=$4, max_tentatives=1,
+         date_debut=$5, date_limite=$6, date_affichage_resultats=$7,
+         mode_affichage=$8, melanger_questions=$9, melanger_reponses=$10
+       WHERE id=$11 RETURNING *`,
+      [titre, description, notePassage, dureeMinutes,
        dateDebut || null, dateLimite || null, dateAffichageResultats || null,
        modeAffichage, melangerQuestions, melangerReponses, id]
     );
@@ -522,7 +525,35 @@ const demarrerTentative = async (req, res) => {
     if (reussiRes.rows.length)
       return res.status(400).json({ error: 'Vous avez déjà réussi cet examen.' });
 
-    // Pas de limite de tentatives — l'étudiant a une seule passe (déjà réussi vérifié plus haut)
+    // Vérifier si déjà échoué (tentative soumise)
+    const echoueRes = await client.query(
+      `SELECT id FROM tentatives_examen WHERE examen_id=$1 AND etudiant_id=$2 AND statut='ECHOUE'`,
+      [id, req.user.id]
+    );
+    if (echoueRes.rows.length)
+      return res.status(400).json({ error: 'Vous avez déjà passé cet examen (résultat : échoué).' });
+
+    // Vérifier si tentative EN_COURS existante
+    const enCoursRes = await client.query(
+      `SELECT * FROM tentatives_examen WHERE examen_id=$1 AND etudiant_id=$2 AND statut='EN_COURS'`,
+      [id, req.user.id]
+    );
+    if (enCoursRes.rows.length) {
+      const existing = enCoursRes.rows[0];
+      if (new Date() < new Date(existing.expires_at)) {
+        // Tentative encore valide → la retourner directement
+        await client.query('COMMIT');
+        return res.status(201).json({ tentative: existing, examen, expiresAt: existing.expires_at });
+      } else {
+        // Tentative expirée → la marquer ECHOUE et bloquer
+        await client.query(
+          `UPDATE tentatives_examen SET statut='ECHOUE', submitted_at=NOW() WHERE id=$1`,
+          [existing.id]
+        );
+        await client.query('COMMIT');
+        return res.status(400).json({ error: 'Votre tentative a expiré. Consultez vos résultats.' });
+      }
+    }
 
     // Calculer score_max
     const scoreRes = await client.query(
@@ -827,183 +858,12 @@ const revoquerCertificat = async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Erreur serveur' }); }
 };
 
-// ══════════════════════════════════════════════════════════════════
-// Téléchargement PDF d'un certificat (toujours régénéré)
-// GET /api/certificats/telecharger/:numero
-// ══════════════════════════════════════════════════════════════════
-const telechargerCertificat = async (req, res) => {
-  const { numero } = req.params;
-  try {
-    const fs          = require('fs');
-    const certService = require('../services/certificat.service');
-
-    // Récupérer toutes les infos du certificat
-    const { rows } = await pool.query(
-      `SELECT c.*,
-              u.prenom  as etudiant_prenom, u.nom  as etudiant_nom,
-              e.titre   as examen_titre,
-              s.nom     as salle_nom,       s.matiere,
-              tu.prenom as tuteur_prenom,   tu.nom as tuteur_nom
-       FROM certificats c
-       JOIN utilisateurs u  ON c.etudiant_id = u.id
-       JOIN examens e        ON c.examen_id   = e.id
-       JOIN salles s         ON e.salle_id    = s.id
-       JOIN utilisateurs tu  ON e.tuteur_id   = tu.id
-       WHERE c.numero_certificat = $1`, [numero]
-    );
-
-    if (!rows.length)
-      return res.status(404).json({ error: 'Certificat introuvable.' });
-
-    const info = rows[0];
-
-    // Vérifier que l'étudiant connecté est bien le propriétaire (ou admin)
-    if (req.user.role !== 'admin' && String(info.etudiant_id) !== String(req.user.id))
-      return res.status(403).json({ error: 'Accès non autorisé.' });
-
-    // Supprimer l'ancien PDF pour forcer la régénération avec le design actuel
-    const pdfPath = certService.getCertificatFilePath(numero);
-    if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath);
-
-    // Générer le PDF avec le service actuel
-    await certService.genererCertificatPDF({
-      certId:         info.id,
-      numeroCert:     numero,
-      etudiantPrenom: info.etudiant_prenom,
-      etudiantNom:    info.etudiant_nom,
-      examenTitre:    info.examen_titre,
-      salleNom:       info.salle_nom   || '',
-      matiere:        info.matiere     || '',
-      tuteurNom:      `${info.tuteur_prenom} ${info.tuteur_nom}`,
-      scoreObtenu:    info.score_obtenu,
-      dateEmission:   info.date_emission,
-    });
-
-    if (!fs.existsSync(pdfPath))
-      return res.status(500).json({ error: 'Erreur lors de la génération du PDF.' });
-
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="Certificat-SmartEdu-${numero}.pdf"`);
-    fs.createReadStream(pdfPath).pipe(res);
-
-  } catch (err) {
-    console.error('telechargerCertificat error:', err.message);
-    res.status(500).json({ error: 'Erreur serveur lors du téléchargement.' });
-  }
-};
-
-// ══════════════════════════════════════════════════════════════════
-// TUTEUR — Statistiques complètes d'un examen
-// GET /api/examens/:id/stats
-// ══════════════════════════════════════════════════════════════════
-const getStatsExamen = async (req, res) => {
-  const { id } = req.params;
-  try {
-    const examRes = await pool.query(
-      `SELECT e.*, s.nom as salle_nom,
-              u.prenom as tuteur_prenom, u.nom as tuteur_nom
-       FROM examens e
-       JOIN salles s ON e.salle_id = s.id
-       JOIN utilisateurs u ON e.tuteur_id = u.id
-       WHERE e.id = $1`, [id]
-    );
-    if (!examRes.rows.length)
-      return res.status(404).json({ error: 'Examen introuvable' });
-    const examen = examRes.rows[0];
-
-    if (String(examen.tuteur_id) !== String(req.user.id) && req.user.role !== 'admin')
-      return res.status(403).json({ error: 'Non autorisé' });
-
-    // Colonnes optionnelles
-    let extra = {};
-    try {
-      const r = await pool.query(
-        `SELECT date_debut, date_limite, date_affichage_resultats, mode_affichage
-         FROM examens WHERE id = $1`, [id]
-      );
-      if (r.rows.length) extra = r.rows[0];
-    } catch (_) {}
-
-    // Questions avec réponses
-    const qRes = await pool.query(
-      `SELECT q.*,
-        COALESCE(
-          json_agg(
-            json_build_object('id', r.id, 'texte', r.texte, 'ordre', r.ordre, 'est_correcte', r.est_correcte)
-            ORDER BY r.ordre
-          ) FILTER (WHERE r.id IS NOT NULL), '[]'
-        ) as reponses
-       FROM questions_examen q
-       LEFT JOIN reponses_question r ON r.question_id = q.id
-       WHERE q.examen_id = $1
-       GROUP BY q.id ORDER BY q.ordre`, [id]
-    );
-
-    // Toutes les tentatives avec infos étudiant
-    const tentRes = await pool.query(
-      `SELECT t.*,
-              u.prenom as etudiant_prenom, u.nom as etudiant_nom, u.email as etudiant_email
-       FROM tentatives_examen t
-       JOIN utilisateurs u ON t.etudiant_id = u.id
-       WHERE t.examen_id = $1
-       ORDER BY t.started_at DESC`, [id]
-    );
-
-    // Stats
-    const terminees = tentRes.rows.filter(t => t.statut !== 'EN_COURS');
-    const reussies  = tentRes.rows.filter(t => t.statut === 'REUSSI');
-    const scores    = terminees.map(t => parseFloat(t.pourcentage)).filter(s => !isNaN(s));
-    const moy       = scores.length ? (scores.reduce((a,b) => a+b, 0) / scores.length).toFixed(1) : null;
-
-    res.json({
-      examen: { ...examen, ...extra },
-      questions: qRes.rows,
-      tentatives: tentRes.rows,
-      stats: {
-        total:         tentRes.rows.length,
-        terminees:     terminees.length,
-        reussies:      reussies.length,
-        echecs:        terminees.length - reussies.length,
-        tauxReussite:  terminees.length ? ((reussies.length / terminees.length)*100).toFixed(0) : null,
-        moyenneScore:  moy,
-      },
-    });
-  } catch (err) {
-    console.error('getStatsExamen error:', err);
-    res.status(500).json({ error: 'Erreur serveur' });
-  }
-};
-
-// ══════════════════════════════════════════════════════════════════
-// ÉTUDIANT — Dernière tentative pour un examen
-// GET /api/examens/:id/ma-derniere-tentative
-// ══════════════════════════════════════════════════════════════════
-const getMaDerniereTentative = async (req, res) => {
-  const { id } = req.params;
-  try {
-    const { rows } = await pool.query(
-      `SELECT * FROM tentatives_examen
-       WHERE examen_id = $1 AND etudiant_id = $2
-       ORDER BY started_at DESC LIMIT 1`,
-      [id, req.user.id]
-    );
-    if (!rows.length)
-      return res.status(404).json({ error: 'Aucune tentative trouvée.' });
-    res.json({ tentativeId: rows[0].id, tentative: rows[0] });
-  } catch (err) {
-    res.status(500).json({ error: 'Erreur serveur' });
-  }
-};
-
-
 module.exports = {
-  getStatsExamen,
-  getMaDerniereTentative,
   createExamen, updateExamen,
   addQuestion, updateQuestion, deleteQuestion,
   publierExamen, archiverExamen,
   getExamensSalle, getMesExamens, getMesExamensEtudiant, getExamen,
   getTentativesExamen, getMesTentativesExamen,
   demarrerTentative, soumettreReponses, getResultatsTentative,
-  mesCertificats, verifierCertificat, revoquerCertificat, telechargerCertificat,
+  mesCertificats, verifierCertificat, revoquerCertificat,
 };
