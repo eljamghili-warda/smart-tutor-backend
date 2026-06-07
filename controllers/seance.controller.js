@@ -433,16 +433,51 @@ const FENETRE_MINUTES = 15;
 
 const verifierSeancesExpirees = async () => {
   try {
-    // 1. Séances PLANIFIEE sans appel lancé 15 min après le début → ANNULEE
+    // 1. Séances PLANIFIEE sans appel lancé 15 min après le début → ANNULEE + remboursement
     const annulees = await pool.query(
       `UPDATE seances SET statut='ANNULEE'
        WHERE statut='PLANIFIEE'
          AND session_appel_id IS NULL
-         AND NOW() > date_debut + (${FENETRE_MINUTES} * interval '1 minute')
-       RETURNING id`
+         AND NOW() > date_debut + INTERVAL '15 minutes'
+       RETURNING id, titre, salle_id, tuteur_id, date_debut, statut_paiement`
     );
-    if (annulees.rows.length)
-      console.log(`🔄 ${annulees.rows.length} séance(s) PLANIFIEE non lancée +${FENETRE_MINUTES}min → ANNULEE`);
+
+    for (const seance of annulees.rows) {
+      console.log(`🔄 Séance ${seance.id} "${seance.titre}" non lancée +15min → ANNULEE`);
+
+      // Si la séance était payée → rembourser automatiquement + email
+      if (['PAYE', 'EN_ATTENTE_LIBERATION'].includes(seance.statut_paiement)) {
+        try {
+          const paiementRes = await pool.query(
+            `SELECT p.id, p.montant_total, p.reference,
+                    u.email as payeur_email, u.prenom as payeur_prenom, u.nom as payeur_nom
+             FROM paiements p
+             JOIN utilisateurs u ON p.payeur_id = u.id
+             WHERE p.seance_id=$1 AND p.statut IN ('COMPLETE','EN_ATTENTE_LIBERATION')
+             LIMIT 1`,
+            [seance.id]
+          );
+          if (paiementRes.rows.length) {
+            const p = paiementRes.rows[0];
+            await pool.query(
+              `UPDATE paiements SET statut='REMBOURSE', date_remboursement=NOW() WHERE id=$1`, [p.id]
+            );
+            await pool.query(
+              `UPDATE seances SET statut_paiement='REMBOURSE' WHERE id=$1`, [seance.id]
+            );
+            emailService.sendConfirmationRemboursement({
+              to:  p.payeur_email,
+              nom: `${p.payeur_prenom} ${p.payeur_nom}`,
+              seance:   { titre: seance.titre, date_debut: seance.date_debut },
+              paiement: { montant_total: p.montant_total, reference: p.reference },
+            }).catch(console.error);
+            console.log(`💸 Remboursement automatique déclenché pour séance ${seance.id}`);
+          }
+        } catch (refundErr) {
+          console.error(`Erreur remboursement auto séance ${seance.id}:`, refundErr);
+        }
+      }
+    }
 
     // 2. Séances EN_COURS dont l'appel est terminé → REALISEE ou ANNULEE
     const sesTerminees = await pool.query(
