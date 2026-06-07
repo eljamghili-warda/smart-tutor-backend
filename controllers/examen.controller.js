@@ -545,13 +545,13 @@ const demarrerTentative = async (req, res) => {
         await client.query('COMMIT');
         return res.status(201).json({ tentative: existing, examen, expiresAt: existing.expires_at });
       } else {
-        // Tentative expirée → la marquer ECHOUE et bloquer
+        // Tentative expirée → la marquer ECHOUE et permettre de recommencer
+        // (cas où duree_minutes était 0 ou tentative oubliée)
         await client.query(
           `UPDATE tentatives_examen SET statut='ECHOUE', submitted_at=NOW() WHERE id=$1`,
           [existing.id]
         );
-        await client.query('COMMIT');
-        return res.status(400).json({ error: 'Votre tentative a expiré. Consultez vos résultats.' });
+        // On continue pour créer une nouvelle tentative
       }
     }
 
@@ -560,7 +560,10 @@ const demarrerTentative = async (req, res) => {
       `SELECT COALESCE(SUM(points),0) as total FROM questions_examen WHERE examen_id=$1`, [id]
     );
     const scoreMax = parseFloat(scoreRes.rows[0].total);
-    const expiresAt = new Date(Date.now() + examen.duree_minutes * 60 * 1000);
+
+    // Sécurité : duree_minutes minimum 1 minute pour éviter expiration instantanée
+    const dureeMin = Math.max(parseInt(examen.duree_minutes) || 60, 1);
+    const expiresAt = new Date(Date.now() + dureeMin * 60 * 1000);
 
     const tentRes = await client.query(
       `INSERT INTO tentatives_examen (examen_id, etudiant_id, score_max, expires_at)
@@ -647,64 +650,79 @@ const soumettreReponses = async (req, res) => {
       [statut, scoreObtenu, pourcentage, tentativeId]
     );
 
-    // ─── Certificat automatique si réussi ────────────────
+    await client.query('COMMIT');
+
+    // ─── Certificat automatique si réussi (HORS transaction principale) ────
     let certificat = null;
     if (reussi) {
-      const certExist = await client.query(
-        `SELECT id FROM certificats WHERE etudiant_id=$1 AND examen_id=$2`,
-        [req.user.id, tentative.examen_id]
-      );
-      if (!certExist.rows.length) {
-        const seqRes = await client.query(`SELECT COUNT(*)+1 as num FROM certificats`);
-        const num = String(seqRes.rows[0].num).padStart(5, '0');
-        const year = new Date().getFullYear();
-        const numeroCert = `CERT-${year}-${num}`;
-
-        const certRes = await client.query(
-          `INSERT INTO certificats (etudiant_id, examen_id, tentative_id, numero_certificat, score_obtenu)
-           VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-          [req.user.id, tentative.examen_id, tentativeId, numeroCert, pourcentage]
+      try {
+        // Vérifier si certificat déjà existant
+        const certExist = await pool.query(
+          `SELECT * FROM certificats WHERE etudiant_id=$1 AND examen_id=$2`,
+          [req.user.id, tentative.examen_id]
         );
-        certificat = certRes.rows[0];
 
-        // Emails
-        const etudiantRes = await client.query(
-          `SELECT * FROM utilisateurs WHERE id=$1`, [req.user.id]
-        );
-        const etudiant = etudiantRes.rows[0];
+        if (certExist.rows.length) {
+          // Certificat déjà créé — le retourner
+          certificat = certExist.rows[0];
+        } else {
+          // Générer un numéro unique garanti avec timestamp + random
+          const year = new Date().getFullYear();
+          const ts   = Date.now().toString().slice(-6);
+          const rand = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+          const numeroCert = `CERT-${year}-${ts}${rand}`;
 
-        emailService.sendCertificatEmail({
-          to: etudiant.email,
-          nom: `${etudiant.prenom} ${etudiant.nom}`,
-          examenTitre: tentative.examen_titre,
-          sallenom: tentative.salle_nom,
-          numeroCert,
-          score: pourcentage.toFixed(1),
-          tuteurNom: `${tentative.tuteur_prenom} ${tentative.tuteur_nom}`,
-        }).catch(console.error);
+          const certRes = await pool.query(
+            `INSERT INTO certificats
+               (etudiant_id, examen_id, tentative_id, numero_certificat, score_obtenu)
+             VALUES ($1,$2,$3,$4,$5)
+             ON CONFLICT (etudiant_id, examen_id) DO UPDATE
+               SET score_obtenu = EXCLUDED.score_obtenu
+             RETURNING *`,
+            [req.user.id, tentative.examen_id, tentativeId, numeroCert, pourcentage]
+          );
+          certificat = certRes.rows[0];
 
-        emailService.sendNotifTuteurCertificat({
-          to: tentative.tuteur_email,
-          tuteurNom: `${tentative.tuteur_prenom} ${tentative.tuteur_nom}`,
-          etudiantNom: `${etudiant.prenom} ${etudiant.nom}`,
-          examenTitre: tentative.examen_titre,
-          score: pourcentage.toFixed(1),
-          numeroCert,
-        }).catch(console.error);
+          // Emails (non bloquants)
+          const etudiantRes = await pool.query(
+            `SELECT * FROM utilisateurs WHERE id=$1`, [req.user.id]
+          );
+          const etudiant = etudiantRes.rows[0];
 
-        // Notification WebSocket certificat:emis
-        const io = req.app.get('io');
-        if (io) {
-          io.to(`user:${req.user.id}`).emit('certificat:emis', {
-            certificat,
+          emailService.sendCertificatEmail({
+            to: etudiant.email,
+            nom: `${etudiant.prenom} ${etudiant.nom}`,
+            examenTitre: tentative.examen_titre,
+            sallenom: tentative.salle_nom,
+            numeroCert: certificat.numero_certificat,
+            score: pourcentage.toFixed(1),
+            tuteurNom: `${tentative.tuteur_prenom} ${tentative.tuteur_nom}`,
+          }).catch(console.error);
+
+          emailService.sendNotifTuteurCertificat({
+            to: tentative.tuteur_email,
+            tuteurNom: `${tentative.tuteur_prenom} ${tentative.tuteur_nom}`,
+            etudiantNom: `${etudiant.prenom} ${etudiant.nom}`,
             examenTitre: tentative.examen_titre,
             score: pourcentage.toFixed(1),
-          });
+            numeroCert: certificat.numero_certificat,
+          }).catch(console.error);
+
+          // WebSocket
+          const io = req.app.get('io');
+          if (io) {
+            io.to(`user:${req.user.id}`).emit('certificat:emis', {
+              certificat,
+              examenTitre: tentative.examen_titre,
+              score: pourcentage.toFixed(1),
+            });
+          }
         }
+      } catch (certErr) {
+        // Ne pas bloquer la réponse si le certificat échoue
+        console.error('Certificat error (non bloquant):', certErr.message);
       }
     }
-
-    await client.query('COMMIT');
 
     // Déterminer si les résultats sont affichables maintenant
     const maintenant = new Date();
@@ -858,6 +876,82 @@ const revoquerCertificat = async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Erreur serveur' }); }
 };
 
+// ══════════════════════════════════════════════════════════════════
+// TUTEUR — Statistiques détaillées d'un examen
+// GET /api/examens/:id/stats
+// ══════════════════════════════════════════════════════════════════
+const getStatsExamen = async (req, res) => {
+  const { id } = req.params;
+  try {
+    // Vérifier que l'examen appartient au tuteur
+    const examRes = await pool.query(
+      `SELECT e.*, u.prenom as tuteur_prenom, u.nom as tuteur_nom
+       FROM examens e JOIN utilisateurs u ON e.tuteur_id=u.id
+       WHERE e.id=$1`, [id]
+    );
+    if (!examRes.rows.length)
+      return res.status(404).json({ error: 'Examen introuvable' });
+    const examen = examRes.rows[0];
+
+    if (String(examen.tuteur_id) !== String(req.user.id) && req.user.role !== 'admin')
+      return res.status(403).json({ error: 'Accès non autorisé' });
+
+    // Questions avec réponses
+    const qRes = await pool.query(
+      `SELECT q.*,
+        COALESCE(
+          json_agg(
+            json_build_object('id',r.id,'texte',r.texte,'est_correcte',r.est_correcte,'ordre',r.ordre)
+            ORDER BY r.ordre
+          ) FILTER (WHERE r.id IS NOT NULL), '[]'
+        ) as reponses
+       FROM questions_examen q
+       LEFT JOIN reponses_question r ON r.question_id=q.id
+       WHERE q.examen_id=$1
+       GROUP BY q.id ORDER BY q.ordre`, [id]
+    );
+
+    // Tentatives avec infos étudiants
+    const tRes = await pool.query(
+      `SELECT t.*,
+              u.prenom as etudiant_prenom, u.nom as etudiant_nom, u.email as etudiant_email
+       FROM tentatives_examen t
+       JOIN utilisateurs u ON t.etudiant_id=u.id
+       WHERE t.examen_id=$1
+       ORDER BY t.started_at DESC`, [id]
+    );
+
+    const tentatives  = tRes.rows;
+    const terminees   = tentatives.filter(t => t.statut === 'REUSSI' || t.statut === 'ECHOUE');
+    const reussies    = tentatives.filter(t => t.statut === 'REUSSI');
+    const echecs      = tentatives.filter(t => t.statut === 'ECHOUE');
+    const scores      = terminees.map(t => parseFloat(t.pourcentage || 0));
+    const moyenneScore = scores.length
+      ? (scores.reduce((a,b) => a+b, 0) / scores.length).toFixed(1)
+      : null;
+    const tauxReussite = terminees.length
+      ? ((reussies.length / terminees.length) * 100).toFixed(0)
+      : null;
+
+    res.json({
+      examen,
+      questions:  qRes.rows,
+      tentatives,
+      stats: {
+        total:        tentatives.length,
+        terminees:    terminees.length,
+        reussies:     reussies.length,
+        echecs:       echecs.length,
+        moyenneScore,
+        tauxReussite,
+      },
+    });
+  } catch (err) {
+    console.error('getStatsExamen error:', err);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+};
+
 module.exports = {
   createExamen, updateExamen,
   addQuestion, updateQuestion, deleteQuestion,
@@ -866,4 +960,5 @@ module.exports = {
   getTentativesExamen, getMesTentativesExamen,
   demarrerTentative, soumettreReponses, getResultatsTentative,
   mesCertificats, verifierCertificat, revoquerCertificat,
+  getStatsExamen,
 };
