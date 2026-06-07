@@ -87,8 +87,8 @@ const getCreneauxDisponibles = async (req, res) => {
     if (!tuteurId) return res.status(400).json({ error: 'tuteurId requis' });
 
     const dureeMin = parseInt(duree);
-    if (isNaN(dureeMin) || dureeMin < 30 || dureeMin > 480)
-      return res.status(400).json({ error: 'duree invalide (30–480 min)' });
+    if (isNaN(dureeMin) || dureeMin < 5 || dureeMin > 480)
+      return res.status(400).json({ error: 'duree invalide (5–480 min)' });
 
     // 1. Plages de disponibilité du tuteur
     const dispos = await pool.query(
