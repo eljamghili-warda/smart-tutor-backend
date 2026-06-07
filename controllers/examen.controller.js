@@ -683,38 +683,67 @@ const soumettreReponses = async (req, res) => {
           );
           certificat = certRes.rows[0];
 
-          // Emails (non bloquants)
+          // ── Emails : envoyer maintenant OU différer selon date_affichage ──
           const etudiantRes = await pool.query(
             `SELECT * FROM utilisateurs WHERE id=$1`, [req.user.id]
           );
           const etudiant = etudiantRes.rows[0];
 
-          emailService.sendCertificatEmail({
-            to: etudiant.email,
-            nom: `${etudiant.prenom} ${etudiant.nom}`,
-            examenTitre: tentative.examen_titre,
-            sallenom: tentative.salle_nom,
-            numeroCert: certificat.numero_certificat,
-            score: pourcentage.toFixed(1),
-            tuteurNom: `${tentative.tuteur_prenom} ${tentative.tuteur_nom}`,
-          }).catch(console.error);
+          const maintenant2      = new Date();
+          const dateAffich2      = tentative.date_affichage_resultats
+            ? new Date(tentative.date_affichage_resultats) : null;
+          const envoyerMaintenant = !dateAffich2 || maintenant2 >= dateAffich2;
 
-          emailService.sendNotifTuteurCertificat({
-            to: tentative.tuteur_email,
-            tuteurNom: `${tentative.tuteur_prenom} ${tentative.tuteur_nom}`,
-            etudiantNom: `${etudiant.prenom} ${etudiant.nom}`,
-            examenTitre: tentative.examen_titre,
-            score: pourcentage.toFixed(1),
-            numeroCert: certificat.numero_certificat,
-          }).catch(console.error);
+          if (envoyerMaintenant) {
+            // Pas de date d'affichage ou date déjà passée → email immédiat
+            emailService.sendCertificatEmail({
+              to: etudiant.email,
+              nom: `${etudiant.prenom} ${etudiant.nom}`,
+              examenTitre: tentative.examen_titre,
+              sallenom: tentative.salle_nom,
+              numeroCert: certificat.numero_certificat,
+              score: pourcentage.toFixed(1),
+              tuteurNom: `${tentative.tuteur_prenom} ${tentative.tuteur_nom}`,
+            }).catch(console.error);
 
-          // WebSocket
+            emailService.sendNotifTuteurCertificat({
+              to: tentative.tuteur_email,
+              tuteurNom: `${tentative.tuteur_prenom} ${tentative.tuteur_nom}`,
+              etudiantNom: `${etudiant.prenom} ${etudiant.nom}`,
+              examenTitre: tentative.examen_titre,
+              score: pourcentage.toFixed(1),
+              numeroCert: certificat.numero_certificat,
+            }).catch(console.error);
+
+            // Marquer l'email comme envoyé
+            await pool.query(
+              `ALTER TABLE tentatives_examen ADD COLUMN IF NOT EXISTS email_envoye BOOLEAN DEFAULT FALSE`
+            ).catch(() => {});
+            await pool.query(
+              `UPDATE tentatives_examen SET email_envoye = TRUE WHERE id = $1`,
+              [tentativeId]
+            ).catch(() => {});
+
+          } else {
+            // Date d'affichage dans le futur → différer l'email (cron l'enverra)
+            console.log(`📧 Email différé jusqu'au ${dateAffich2.toISOString()} pour tentative ${tentativeId}`);
+            await pool.query(
+              `ALTER TABLE tentatives_examen ADD COLUMN IF NOT EXISTS email_envoye BOOLEAN DEFAULT FALSE`
+            ).catch(() => {});
+            await pool.query(
+              `UPDATE tentatives_examen SET email_envoye = FALSE WHERE id = $1`,
+              [tentativeId]
+            ).catch(() => {});
+          }
+
+          // WebSocket (toujours immédiat — juste pour notifier que l'examen est terminé)
           const io = req.app.get('io');
           if (io) {
             io.to(`user:${req.user.id}`).emit('certificat:emis', {
               certificat,
               examenTitre: tentative.examen_titre,
               score: pourcentage.toFixed(1),
+              affichageResultats: dateAffich2 ? dateAffich2.toISOString() : null,
             });
           }
         }

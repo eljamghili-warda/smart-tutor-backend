@@ -1,4 +1,5 @@
 require('dotenv').config();
+const emailService = require('./services/email.service');
 const express    = require('express');
 const http       = require('http');
 const { Server } = require('socket.io');
@@ -88,5 +89,104 @@ const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`🚀 SmartTutor server running on port ${PORT}`);
   console.log(`📡 WebSocket ready`);
-  console.log(`🔁 Crons : invitations · séances expirées · non-paiement 24h`);
+  console.log(`🔁 Crons : invitations · séances expirées · non-paiement 24h · emails résultats`);
+
+  // 4. Cron : envoyer les emails de résultats différés — toutes les 5 minutes
+  const envoyerEmailsResultatsDifferes = async () => {
+    try {
+      // Ajouter colonne si elle n'existe pas encore
+      await pool.query(`
+        ALTER TABLE tentatives_examen 
+        ADD COLUMN IF NOT EXISTS email_envoye BOOLEAN DEFAULT FALSE
+      `).catch(() => {});
+
+      // Trouver toutes les tentatives dont l'email n'a pas été envoyé
+      // ET dont la date d'affichage des résultats est passée (ou nulle)
+      const res = await pool.query(`
+        SELECT 
+          t.id, t.etudiant_id, t.examen_id, t.statut,
+          t.score_obtenu, t.pourcentage,
+          e.titre as examen_titre, e.note_passage,
+          e.date_affichage_resultats,
+          s.nom as salle_nom,
+          ue.email as etudiant_email, ue.prenom as etudiant_prenom, ue.nom as etudiant_nom,
+          ut.email as tuteur_email, ut.prenom as tuteur_prenom, ut.nom as tuteur_nom,
+          c.numero_certificat, c.id as certificat_id
+        FROM tentatives_examen t
+        JOIN examens e ON t.examen_id = e.id
+        JOIN salles s ON e.salle_id = s.id
+        JOIN utilisateurs ue ON t.etudiant_id = ue.id
+        JOIN utilisateurs ut ON e.tuteur_id = ut.id
+        LEFT JOIN certificats c ON c.examen_id = t.examen_id AND c.etudiant_id = t.etudiant_id
+        WHERE t.email_envoye = FALSE
+          AND t.statut IN ('REUSSI', 'ECHOUE')
+          AND t.submitted_at IS NOT NULL
+          AND (
+            e.date_affichage_resultats IS NULL
+            OR e.date_affichage_resultats <= NOW()
+          )
+      `);
+
+      if (res.rows.length > 0) {
+        console.log(`📧 Cron emails : ${res.rows.length} email(s) à envoyer`);
+      }
+
+      for (const row of res.rows) {
+        try {
+          if (row.statut === 'REUSSI' && row.numero_certificat) {
+            // Email certificat à l'étudiant
+            await emailService.sendCertificatEmail({
+              to:          row.etudiant_email,
+              nom:         `${row.etudiant_prenom} ${row.etudiant_nom}`,
+              examenTitre: row.examen_titre,
+              sallenom:    row.salle_nom,
+              numeroCert:  row.numero_certificat,
+              score:       parseFloat(row.pourcentage).toFixed(1),
+              tuteurNom:   `${row.tuteur_prenom} ${row.tuteur_nom}`,
+            });
+            // Notif tuteur
+            await emailService.sendNotifTuteurCertificat({
+              to:          row.tuteur_email,
+              tuteurNom:   `${row.tuteur_prenom} ${row.tuteur_nom}`,
+              etudiantNom: `${row.etudiant_prenom} ${row.etudiant_nom}`,
+              examenTitre: row.examen_titre,
+              score:       parseFloat(row.pourcentage).toFixed(1),
+              numeroCert:  row.numero_certificat,
+            });
+          } else if (row.statut === 'ECHOUE') {
+            // Email résultat échoué à l'étudiant
+            await emailService.sendResultatExamenEmail({
+              to:          row.etudiant_email,
+              nom:         `${row.etudiant_prenom} ${row.etudiant_nom}`,
+              examenTitre: row.examen_titre,
+              sallenom:    row.salle_nom,
+              score:       parseFloat(row.pourcentage).toFixed(1),
+              notePassage: row.note_passage,
+              reussi:      false,
+              tuteurNom:   `${row.tuteur_prenom} ${row.tuteur_nom}`,
+            }).catch(() => {
+              // Si sendResultatExamenEmail n'existe pas, on ignore silencieusement
+            });
+          }
+
+          // Marquer comme envoyé
+          await pool.query(
+            `UPDATE tentatives_examen SET email_envoye = TRUE WHERE id = $1`,
+            [row.id]
+          );
+          console.log(`✅ Email envoyé pour tentative ${row.id} (${row.statut})`);
+
+        } catch (emailErr) {
+          console.error(`❌ Erreur email tentative ${row.id}:`, emailErr.message);
+          // Ne pas marquer comme envoyé → sera retenté au prochain cron
+        }
+      }
+    } catch (err) {
+      console.error('Cron emails résultats error:', err.message);
+    }
+  };
+
+  // Lancer immédiatement au démarrage puis toutes les 5 minutes
+  envoyerEmailsResultatsDifferes();
+  setInterval(envoyerEmailsResultatsDifferes, 5 * 60 * 1000);
 });
