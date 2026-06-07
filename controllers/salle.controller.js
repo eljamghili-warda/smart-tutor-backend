@@ -240,10 +240,15 @@ const demanderInvitation = async (req, res) => {
     );
     if (!adminSalle.rows.length) return res.status(404).json({ error: 'Admin de la salle introuvable' });
 
+    // ── Type d'invitation selon le rôle du demandeur ──────────────────────
+    // Tuteur qui demande → VERS_TUTEUR → il deviendra CO_ADMIN si accepté
+    // Étudiant qui demande → VERS_ETUDIANT → il deviendra MEMBRE si accepté
+    const typeInvitation = req.user.role === 'tuteur' ? 'VERS_TUTEUR' : 'VERS_ETUDIANT';
+
     await pool.query(
       `INSERT INTO invitations (salle_id, expediteur_id, destinataire_id, type_invitation)
-       VALUES ($1,$2,$3,'VERS_ETUDIANT')`,
-      [id, req.user.id, adminSalle.rows[0].utilisateur_id]
+       VALUES ($1,$2,$3,$4)`,
+      [id, req.user.id, adminSalle.rows[0].utilisateur_id, typeInvitation]
     );
 
     res.json({ message: 'Demande d\'invitation envoyée à l\'admin de la salle.' });

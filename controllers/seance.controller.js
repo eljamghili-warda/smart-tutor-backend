@@ -429,22 +429,22 @@ const annulerSeancesNonPayees = async () => {
 // ── CRON : règle des 5 minutes (appel vidéo) ─────────────────────────────────
 // ÉTAPE 8 → EN_COURS quand appel lancé
 // ÉTAPE 9 → REALISEE si appel terminé dans la fenêtre, ANNULEE si trop tôt
-const FENETRE_MINUTES = 5;
+const FENETRE_MINUTES = 15;
 
 const verifierSeancesExpirees = async () => {
   try {
-    // 1. Séances PLANIFIEE sans appel dont la fin + 5min est dépassée → ANNULEE
+    // 1. Séances PLANIFIEE sans appel lancé 15 min après le début → ANNULEE
     const annulees = await pool.query(
       `UPDATE seances SET statut='ANNULEE'
        WHERE statut='PLANIFIEE'
          AND session_appel_id IS NULL
-         AND (date_debut + (duree * interval '1 minute') + interval '5 minutes') < NOW()
+         AND NOW() > date_debut + (${FENETRE_MINUTES} * interval '1 minute')
        RETURNING id`
     );
     if (annulees.rows.length)
-      console.log(`🔄 ${annulees.rows.length} séance(s) PLANIFIEE sans appel → ANNULEE`);
+      console.log(`🔄 ${annulees.rows.length} séance(s) PLANIFIEE non lancée +${FENETRE_MINUTES}min → ANNULEE`);
 
-    // 2. Séances EN_COURS dont l'appel est terminé → REALISEE ou ANNULEE selon règle 5 min
+    // 2. Séances EN_COURS dont l'appel est terminé → REALISEE ou ANNULEE
     const sesTerminees = await pool.query(
       `SELECT s.id AS seance_id, s.date_debut, s.duree, sa.date_fin
        FROM seances s
@@ -465,7 +465,6 @@ const verifierSeancesExpirees = async () => {
       );
       console.log(`${termineTropTot ? '⚠️' : '✅'} Séance ${row.seance_id} → ${statut}`);
 
-      // Si REALISEE → libérer les fonds (85% tuteur + 15% plateforme)
       if (statut === 'REALISEE') {
         libererFonds(row.seance_id).catch(console.error);
       }
