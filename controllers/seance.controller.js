@@ -457,22 +457,36 @@ const verifierSeancesExpirees = async () => {
       const marge15 = Math.round(seance.duree * 0.15);
       console.log(`🔄 Séance ${seance.id} "${seance.titre}" — aucun appel lancé après ${marge15} min → ANNULEE`);
 
-      // Récupérer infos tuteur pour lui envoyer l'email
+      // Récupérer infos tuteur + admin salle pour les emails
       try {
-        const tuteurRes = await pool.query(
-          `SELECT u.email, u.prenom, u.nom
-           FROM utilisateurs u WHERE u.id = $1`, [seance.tuteur_id]
+        const infoRes = await pool.query(
+          `SELECT u.email as tuteur_email, u.prenom as tuteur_prenom, u.nom as tuteur_nom,
+                  ua.email as admin_email, ua.prenom as admin_prenom, ua.nom as admin_nom
+           FROM utilisateurs u
+           JOIN participations p ON p.salle_id=$2 AND p.role='ADMIN'
+           JOIN utilisateurs ua ON ua.id=p.utilisateur_id
+           WHERE u.id=$1`,
+          [seance.tuteur_id, seance.salle_id]
         );
-        if (tuteurRes.rows.length) {
-          const t = tuteurRes.rows[0];
+        if (infoRes.rows.length) {
+          const r = infoRes.rows[0];
+          // Email tuteur
           emailService.sendAnnulationTuteur({
-            to:  t.email,
-            nom: `${t.prenom} ${t.nom}`,
+            to:  r.tuteur_email,
+            nom: `${r.tuteur_prenom} ${r.tuteur_nom}`,
             seance: { titre: seance.titre, date_debut: seance.date_debut },
             motif:  `Aucun appel n'a été lancé dans les ${marge15} premières minutes de la séance.`,
           }).catch(console.error);
+          // Email admin salle
+          emailService.sendConfirmationRemboursement({
+            to:  r.admin_email,
+            nom: `${r.admin_prenom} ${r.admin_nom}`,
+            seance:   { titre: seance.titre, date_debut: seance.date_debut },
+            paiement: { montant_total: 0, reference: '—' },
+            motif: `La séance a été annulée automatiquement : aucun appel lancé dans les ${marge15} premières minutes.`,
+          }).catch(console.error);
         }
-      } catch (e) { console.error('Email tuteur annulation:', e.message); }
+      } catch (e) { console.error('Emails annulation auto cas1:', e.message); }
 
       // Si la séance était payée → rembourser automatiquement + email
       if (['PAYE', 'EN_ATTENTE_LIBERATION'].includes(seance.statut_paiement)) {
@@ -540,18 +554,20 @@ const verifierSeancesExpirees = async () => {
       console.log(`${termineTropTot ? '⚠️' : '✅'} Séance ${row.seance_id} → ${statut} (marge 15% = ${marge15Min} min)`);
 
       if (statut === 'REALISEE') {
-        // Passer le paiement COMPLETE → EN_ATTENTE_LIBERATION d'abord si nécessaire
+        // Attendre les UPDATE avant libererFonds (évite la race condition)
         await pool.query(
           `UPDATE paiements SET statut='EN_ATTENTE_LIBERATION'
            WHERE seance_id=$1 AND statut='COMPLETE'`,
           [row.seance_id]
-        ).catch(console.error);
+        );
         await pool.query(
           `UPDATE seances SET statut_paiement='EN_ATTENTE_LIBERATION'
            WHERE id=$1 AND statut_paiement='PAYE'`,
           [row.seance_id]
-        ).catch(console.error);
-        libererFonds(row.seance_id).catch(console.error);
+        );
+        // libererFonds envoie automatiquement email tuteur + admin salle
+        await libererFonds(row.seance_id);
+        console.log(`💸 Fonds libérés pour séance ${row.seance_id}`);
 
       } else {
         // ANNULEE automatique : rembourser + email (même logique qu'annulation manuelle)
@@ -611,6 +627,35 @@ const verifierSeancesExpirees = async () => {
             }
 
             console.log(`💸 Remboursement auto — séance ${row.seance_id} — ${p.montant_total} DH`);
+
+          } else {
+            // Séance sans paiement (gratuite) → email tuteur + admin salle quand même
+            const infoRes = await pool.query(
+              `SELECT s.titre, s.date_debut, s.salle_id,
+                      ut.email as tuteur_email, ut.prenom as tuteur_prenom, ut.nom as tuteur_nom,
+                      ua.email as admin_email, ua.prenom as admin_prenom, ua.nom as admin_nom
+               FROM seances s
+               JOIN utilisateurs ut ON s.tuteur_id = ut.id
+               JOIN participations pr ON pr.salle_id=s.salle_id AND pr.role='ADMIN'
+               JOIN utilisateurs ua ON ua.id=pr.utilisateur_id
+               WHERE s.id=$1`,
+              [row.seance_id]
+            );
+            if (infoRes.rows.length) {
+              const r = infoRes.rows[0];
+              emailService.sendAnnulationTuteur({
+                to:  r.tuteur_email,
+                nom: `${r.tuteur_prenom} ${r.tuteur_nom}`,
+                seance: { titre: r.titre, date_debut: r.date_debut },
+                motif: `L'appel a été terminé trop tôt (plus de ${marge15Min} min avant la fin prévue).`,
+              }).catch(console.error);
+              emailService.sendConfirmationRemboursement({
+                to:  r.admin_email,
+                nom: `${r.admin_prenom} ${r.admin_nom}`,
+                seance:   { titre: r.titre, date_debut: r.date_debut },
+                paiement: { montant_total: 0, reference: '—' },
+              }).catch(console.error);
+            }
           }
         } catch (remboursErr) {
           console.error(`Erreur remboursement auto séance ${row.seance_id}:`, remboursErr);

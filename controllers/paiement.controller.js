@@ -369,7 +369,7 @@ const getMesPaiements = async (req, res) => {
 };
 
 // ── GET /api/paiements/mes-revenus ──────────────────────────────────────────
-// Pour le tuteur : ses gains + stats
+// Pour le tuteur : uniquement les séances REALISEE (montant reçu) et ANNULEE (remboursé)
 const getMesRevenus = async (req, res) => {
   try {
     if (req.user.role !== 'tuteur')
@@ -377,29 +377,43 @@ const getMesRevenus = async (req, res) => {
 
     const paiements = await pool.query(
       `SELECT p.*,
-              s.titre as seance_titre, s.date_debut, s.matiere, s.duree,
-              sa.nom  as salle_nom,
-              up.prenom as payeur_prenom, up.nom as payeur_nom
+              s.titre   as seance_titre,
+              s.date_debut,
+              s.matiere,
+              s.duree,
+              s.statut  as seance_statut,
+              sa.nom    as salle_nom,
+              up.prenom as payeur_prenom,
+              up.nom    as payeur_nom
        FROM paiements p
        JOIN seances s  ON p.seance_id = s.id
        JOIN salles  sa ON s.salle_id  = sa.id
        LEFT JOIN utilisateurs up ON p.payeur_id = up.id
-       WHERE p.tuteur_id=$1
+       WHERE p.tuteur_id = $1
+         AND s.statut IN ('REALISEE', 'ANNULEE')
        ORDER BY p.date_paiement DESC`,
       [req.user.id]
     );
 
     const stats = await pool.query(
       `SELECT
-         COALESCE(SUM(gain_tuteur) FILTER (WHERE statut='COMPLETE'), 0)  as total_gains,
-         COUNT(*)                  FILTER (WHERE statut='COMPLETE')       as nb_paiements,
-         COALESCE(SUM(gain_tuteur) FILTER (WHERE statut='REMBOURSE'), 0) as total_rembourse
-       FROM paiements WHERE tuteur_id=$1`,
+         -- Gains reçus = séances REALISEE uniquement
+         COALESCE(SUM(p.gain_tuteur)
+           FILTER (WHERE s.statut = 'REALISEE'), 0) as total_gains,
+         COUNT(p.id)
+           FILTER (WHERE s.statut = 'REALISEE')     as nb_paiements,
+         -- Remboursements = séances ANNULEE
+         COALESCE(SUM(p.montant_total)
+           FILTER (WHERE p.statut = 'REMBOURSE'), 0) as total_rembourse
+       FROM paiements p
+       JOIN seances s ON p.seance_id = s.id
+       WHERE p.tuteur_id = $1`,
       [req.user.id]
     );
 
     res.json({ paiements: paiements.rows, stats: stats.rows[0] });
   } catch (err) {
+    console.error('getMesRevenus error:', err);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 };

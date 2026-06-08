@@ -330,15 +330,30 @@ const getRevenusDetails = async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT
+        -- Total encaissé = tout ce qui a été payé (hors remboursements)
         COALESCE(SUM(montant_total) FILTER (WHERE statut IN ('COMPLETE','EN_ATTENTE_LIBERATION','LIBERE')), 0) as total_encaisse,
+
+        -- En escrow = paiements en attente de libération (séance pas encore réalisée)
         COALESCE(SUM(montant_total) FILTER (WHERE statut='EN_ATTENTE_LIBERATION'), 0) as en_escrow,
-        COALESCE(SUM(commission_plateforme) FILTER (WHERE statut='LIBERE'), 0) as commissions_realisees,
+
+        -- Commissions réalisées = 15% des séances LIBERE ou COMPLETE liées à une séance réalisée
+        COALESCE(SUM(p.commission_plateforme) FILTER (WHERE p.statut IN ('LIBERE','COMPLETE')
+          AND EXISTS (SELECT 1 FROM seances s WHERE s.id=p.seance_id AND s.statut='REALISEE')), 0) as commissions_realisees,
+
+        -- Commissions en attente = 15% des paiements EN_ATTENTE_LIBERATION
         COALESCE(SUM(commission_plateforme) FILTER (WHERE statut='EN_ATTENTE_LIBERATION'), 0) as commissions_en_attente,
-        COALESCE(SUM(montant_total) FILTER (WHERE statut='REMBOURSE'), 0) as total_rembourse,
-        COALESCE(SUM(gain_tuteur) FILTER (WHERE statut='LIBERE'), 0) as total_verse_tuteurs,
+
+        -- Remboursements uniquement sur séances annulées
+        COALESCE(SUM(p.montant_total) FILTER (WHERE p.statut='REMBOURSE'
+          AND EXISTS (SELECT 1 FROM seances s WHERE s.id=p.seance_id AND s.statut='ANNULEE')), 0) as total_rembourse,
+
+        -- Versé aux tuteurs = 85% des séances réalisées
+        COALESCE(SUM(p.gain_tuteur) FILTER (WHERE p.statut IN ('LIBERE','COMPLETE')
+          AND EXISTS (SELECT 1 FROM seances s WHERE s.id=p.seance_id AND s.statut='REALISEE')), 0) as total_verse_tuteurs,
+
         COUNT(*) FILTER (WHERE statut IN ('COMPLETE','EN_ATTENTE_LIBERATION','LIBERE')) as nb_paiements,
         COUNT(*) FILTER (WHERE statut='REMBOURSE') as nb_remboursements
-      FROM paiements
+      FROM paiements p
     `);
     res.json(result.rows[0]);
   } catch (err) {
