@@ -535,7 +535,7 @@ const libererFonds = async (seanceId) => {
        LEFT JOIN utilisateurs ut ON p.tuteur_id = ut.id
        LEFT JOIN tuteurs t ON ut.id = t.utilisateur_id
        LEFT JOIN utilisateurs up ON p.payeur_id = up.id
-       WHERE p.seance_id = $1 AND p.statut = 'EN_ATTENTE_LIBERATION'`,
+       WHERE p.seance_id = $1 AND p.statut IN ('EN_ATTENTE_LIBERATION', 'COMPLETE')`,
       [seanceId]
     );
 

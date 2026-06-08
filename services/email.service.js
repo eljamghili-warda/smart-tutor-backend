@@ -330,7 +330,42 @@ module.exports = {
   sendSeanceRealiseeAdmin,
   sendCertificatEmail,
   sendNotifTuteurCertificat,
+  sendValidationTuteur,
 };
+
+// ── EMAIL : Validation compte tuteur par l'admin ──────────────────────────────
+async function sendValidationTuteur({ to, nom, accepte, motif }) {
+  const transporter = createTransporter();
+  const html = wrapTemplate(accepte ? `
+    <div class="icon">🎉</div>
+    <div class="title">Félicitations, ${nom} !</div>
+    <div class="subtitle">Votre compte tuteur SmartEdu a été <strong style="color:#059669">validé</strong> par l'administrateur.</div>
+    <div class="box">
+      <div class="row" style="border-bottom:none">
+        <span class="label">Statut</span>
+        <span class="value" style="color:#059669;font-weight:800">✅ Compte activé</span>
+      </div>
+    </div>
+    <p style="text-align:center;color:#64748b;font-size:13px;margin-top:16px">
+      Vous pouvez maintenant vous connecter et commencer à créer vos séances sur SmartEdu.
+    </p>
+  ` : `
+    <div class="icon">❌</div>
+    <div class="title">Compte non validé</div>
+    <div class="subtitle">Votre demande de compte tuteur SmartEdu a été <strong style="color:#dc2626">refusée</strong>.</div>
+    ${motif ? `<div class="box"><div class="row" style="border-bottom:none"><span class="label">Motif</span><span class="value">${motif}</span></div></div>` : ''}
+    <p style="text-align:center;color:#64748b;font-size:13px;margin-top:16px">
+      Pour plus d'informations, contactez l'équipe SmartEdu.
+    </p>
+  `);
+
+  await transporter.sendMail({
+    from: `"SmartEdu" <${process.env.SMTP_USER}>`,
+    to,
+    subject: accepte ? '✅ Votre compte tuteur SmartEdu est validé !' : '❌ Votre demande tuteur SmartEdu',
+    html,
+  });
+}
 
 // ── EMAIL 5 : Certificat à l'étudiant (PDF en pièce jointe directe) ──
 async function sendCertificatEmail({ to, nom, examenTitre, sallenom, numeroCert, score, tuteurNom, pdfPath }) {

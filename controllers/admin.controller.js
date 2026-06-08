@@ -1,4 +1,5 @@
-const { pool } = require('../config/db');
+const { pool }       = require('../config/db');
+const emailService   = require('../services/email.service');
 
 // ── GET /api/admin/stats ─────────────────────────────────────────────────────
 // Dashboard admin : stats globales incluant les finances
@@ -128,6 +129,20 @@ const validerTuteur = async (req, res) => {
     );
     if (!result.rows.length)
       return res.status(404).json({ error: 'Tuteur introuvable' });
+
+    // Envoyer email au tuteur
+    const userRes = await pool.query(
+      `SELECT email, prenom, nom FROM utilisateurs WHERE id=$1`, [id]
+    );
+    if (userRes.rows.length) {
+      const u = userRes.rows[0];
+      emailService.sendValidationTuteur({
+        to:     u.email,
+        nom:    `${u.prenom} ${u.nom}`,
+        accepte,
+        motif:  motif || '',
+      }).catch(console.error);
+    }
 
     res.json({ message: `Tuteur ${accepte ? 'validé ✅' : 'refusé ❌'}`, statut: newStatut, motif });
   } catch (err) {
@@ -333,22 +348,24 @@ const getRevenusDetails = async (req, res) => {
         -- Total encaissé = tout ce qui a été payé (hors remboursements)
         COALESCE(SUM(montant_total) FILTER (WHERE statut IN ('COMPLETE','EN_ATTENTE_LIBERATION','LIBERE')), 0) as total_encaisse,
 
-        -- En escrow = paiements en attente de libération (séance pas encore réalisée)
-        COALESCE(SUM(montant_total) FILTER (WHERE statut='EN_ATTENTE_LIBERATION'), 0) as en_escrow,
+        -- En escrow = paiements confirmés pas encore libérés (séance pas encore réalisée)
+        COALESCE(SUM(montant_total) FILTER (WHERE statut IN ('COMPLETE','EN_ATTENTE_LIBERATION')
+          AND NOT EXISTS (SELECT 1 FROM seances s WHERE s.id=p.seance_id AND s.statut='REALISEE')), 0) as en_escrow,
 
-        -- Commissions réalisées = 15% des séances LIBERE ou COMPLETE liées à une séance réalisée
-        COALESCE(SUM(p.commission_plateforme) FILTER (WHERE p.statut IN ('LIBERE','COMPLETE')
+        -- Commissions réalisées = 15% des séances REALISEE
+        COALESCE(SUM(p.commission_plateforme) FILTER (WHERE p.statut IN ('LIBERE','COMPLETE','EN_ATTENTE_LIBERATION')
           AND EXISTS (SELECT 1 FROM seances s WHERE s.id=p.seance_id AND s.statut='REALISEE')), 0) as commissions_realisees,
 
-        -- Commissions en attente = 15% des paiements EN_ATTENTE_LIBERATION
-        COALESCE(SUM(commission_plateforme) FILTER (WHERE statut='EN_ATTENTE_LIBERATION'), 0) as commissions_en_attente,
+        -- Commissions en attente = 15% des paiements sur séances pas encore réalisées
+        COALESCE(SUM(commission_plateforme) FILTER (WHERE statut IN ('COMPLETE','EN_ATTENTE_LIBERATION')
+          AND NOT EXISTS (SELECT 1 FROM seances s WHERE s.id=p.seance_id AND s.statut='REALISEE')), 0) as commissions_en_attente,
 
         -- Remboursements uniquement sur séances annulées
         COALESCE(SUM(p.montant_total) FILTER (WHERE p.statut='REMBOURSE'
           AND EXISTS (SELECT 1 FROM seances s WHERE s.id=p.seance_id AND s.statut='ANNULEE')), 0) as total_rembourse,
 
         -- Versé aux tuteurs = 85% des séances réalisées
-        COALESCE(SUM(p.gain_tuteur) FILTER (WHERE p.statut IN ('LIBERE','COMPLETE')
+        COALESCE(SUM(p.gain_tuteur) FILTER (WHERE p.statut IN ('LIBERE','COMPLETE','EN_ATTENTE_LIBERATION')
           AND EXISTS (SELECT 1 FROM seances s WHERE s.id=p.seance_id AND s.statut='REALISEE')), 0) as total_verse_tuteurs,
 
         COUNT(*) FILTER (WHERE statut IN ('COMPLETE','EN_ATTENTE_LIBERATION','LIBERE')) as nb_paiements,
