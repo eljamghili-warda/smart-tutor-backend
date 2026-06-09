@@ -355,6 +355,98 @@ const setupSocket = (io) => {
             seanceId,
             statut: statutFinal,
           });
+
+          // Libérer les fonds et envoyer les emails si séance réalisée
+          if (statutFinal === 'REALISEE') {
+            try {
+              const { libererFonds } = require('../controllers/paiement.controller');
+              await pool.query(
+                `UPDATE paiements SET statut='EN_ATTENTE_LIBERATION' WHERE seance_id=$1 AND statut IN ('COMPLETE','EN_ATTENTE_LIBERATION')`,
+                [seanceId]
+              );
+              const result = await libererFonds(seanceId);
+              if (result) {
+                console.log(`[SOCKET] Fonds libérés + emails envoyés pour séance ${seanceId}`);
+              } else {
+                console.warn(`[SOCKET] libererFonds retourné null pour séance ${seanceId} (pas de paiement ?)`);
+              }
+            } catch (libErr) {
+              console.error(`[SOCKET] libererFonds error pour séance ${seanceId}:`, libErr);
+            }
+
+          } else if (statutFinal === 'ANNULEE') {
+            try {
+              const emailService = require('../services/email.service');
+              // Récupérer le paiement s'il existe
+              const paiRes = await pool.query(
+                `SELECT p.id, p.montant_total, p.reference,
+                        u.email  as payeur_email, u.prenom as payeur_prenom, u.nom as payeur_nom,
+                        s.titre  as seance_titre, s.date_debut,
+                        ut.email as tuteur_email, ut.prenom as tuteur_prenom, ut.nom as tuteur_nom
+                 FROM paiements p
+                 JOIN seances s ON p.seance_id = s.id
+                 JOIN utilisateurs u ON p.payeur_id = u.id
+                 LEFT JOIN utilisateurs ut ON p.tuteur_id = ut.id
+                 WHERE p.seance_id=$1 AND p.statut IN ('COMPLETE','EN_ATTENTE_LIBERATION')
+                 LIMIT 1`,
+                [seanceId]
+              );
+
+              if (paiRes.rows.length) {
+                const p = paiRes.rows[0];
+                // Rembourser
+                await pool.query(
+                  `UPDATE paiements SET statut='REMBOURSE', date_remboursement=NOW() WHERE id=$1`, [p.id]
+                );
+                await pool.query(
+                  `UPDATE seances SET statut_paiement='REMBOURSE' WHERE id=$1`, [seanceId]
+                );
+                // Email remboursement → admin salle
+                if (p.payeur_email) {
+                  emailService.sendConfirmationRemboursement({
+                    to:  p.payeur_email,
+                    nom: `${p.payeur_prenom} ${p.payeur_nom}`,
+                    seance:   { titre: p.seance_titre, date_debut: p.date_debut },
+                    paiement: { montant_total: p.montant_total, reference: p.reference },
+                  }).catch(console.error);
+                }
+                // Email annulation → tuteur
+                if (p.tuteur_email) {
+                  emailService.sendAnnulationTuteur({
+                    to:  p.tuteur_email,
+                    nom: `${p.tuteur_prenom} ${p.tuteur_nom}`,
+                    seance: { titre: p.seance_titre, date_debut: p.date_debut },
+                    motif: `L'appel a été terminé trop tôt.`,
+                  }).catch(console.error);
+                }
+                console.log(`[SOCKET] Remboursement + emails annulation envoyés pour séance ${seanceId}`);
+
+              } else {
+                // Séance sans paiement — email annulation tuteur + admin quand même
+                const infoRes = await pool.query(
+                  `SELECT s.titre, s.date_debut,
+                          ut.email as tuteur_email, ut.prenom as tuteur_prenom, ut.nom as tuteur_nom,
+                          ua.email as admin_email, ua.prenom as admin_prenom, ua.nom as admin_nom
+                   FROM seances s
+                   LEFT JOIN utilisateurs ut ON s.tuteur_id = ut.id
+                   JOIN participations pr ON pr.salle_id=s.salle_id AND pr.role='ADMIN'
+                   JOIN utilisateurs ua ON ua.id=pr.utilisateur_id
+                   WHERE s.id=$1`, [seanceId]
+                );
+                if (infoRes.rows.length) {
+                  const r = infoRes.rows[0];
+                  if (r.tuteur_email) emailService.sendAnnulationTuteur({
+                    to: r.tuteur_email, nom: `${r.tuteur_prenom} ${r.tuteur_nom}`,
+                    seance: { titre: r.titre, date_debut: r.date_debut },
+                    motif: `L'appel a été terminé trop tôt.`,
+                  }).catch(console.error);
+                }
+                console.log(`[SOCKET] Email annulation (sans paiement) pour séance ${seanceId}`);
+              }
+            } catch (annulErr) {
+              console.error(`[SOCKET] Erreur traitement annulation séance ${seanceId}:`, annulErr);
+            }
+          }
         }
       }
 

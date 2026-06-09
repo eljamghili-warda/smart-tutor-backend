@@ -541,7 +541,11 @@ const libererFonds = async (seanceId) => {
 
     if (!paiementRes.rows.length) {
       await client.query('ROLLBACK');
-      console.log(`[LIBERER] Aucun paiement EN_ATTENTE_LIBERATION pour séance ${seanceId}`);
+      // Debug : voir l'état réel du paiement pour cette séance
+      const debugRes = await pool.query(
+        `SELECT id, statut, montant_total FROM paiements WHERE seance_id=$1`, [seanceId]
+      );
+      console.warn(`[LIBERER] Aucun paiement trouvé pour séance ${seanceId}. État actuel:`, debugRes.rows);
       return null;
     }
 
@@ -568,6 +572,7 @@ const libererFonds = async (seanceId) => {
 
     // Email au tuteur : paiement versé
     if (p.tuteur_email) {
+      console.log(`[EMAIL] Envoi email tuteur → ${p.tuteur_email}`);
       emailService.sendVirementTuteur({
         to:  p.tuteur_email,
         nom: `${p.tuteur_prenom} ${p.tuteur_nom}`,
@@ -575,11 +580,15 @@ const libererFonds = async (seanceId) => {
         gainTuteur: p.gain_tuteur,
         reference: p.reference,
         rib: p.tuteur_rib,
-      }).catch(console.error);
+      }).then(() => console.log(`[EMAIL] ✅ Email tuteur envoyé → ${p.tuteur_email}`))
+        .catch(err => console.error(`[EMAIL] ❌ Erreur email tuteur:`, err.message));
+    } else {
+      console.warn(`[EMAIL] Pas d'email tuteur — tuteur_id: ${p.tuteur_id}`);
     }
 
     // Email à l'admin salle : séance réalisée, paiement libéré
     if (p.payeur_email) {
+      console.log(`[EMAIL] Envoi email admin → ${p.payeur_email}`);
       emailService.sendSeanceRealiseeAdmin({
         to:  p.payeur_email,
         nom: `${p.payeur_prenom} ${p.payeur_nom}`,
@@ -589,7 +598,10 @@ const libererFonds = async (seanceId) => {
         gainTuteur:   p.gain_tuteur,
         commission:   p.commission_plateforme,
         reference: p.reference,
-      }).catch(console.error);
+      }).then(() => console.log(`[EMAIL] ✅ Email admin envoyé → ${p.payeur_email}`))
+        .catch(err => console.error(`[EMAIL] ❌ Erreur email admin:`, err.message));
+    } else {
+      console.warn(`[EMAIL] Pas d'email admin — payeur_id: ${p.payeur_id}`);
     }
 
     console.log(`✅ [LIBERER] Fonds libérés — séance ${seanceId} — ${p.gain_tuteur} DH → tuteur / ${p.commission_plateforme} DH → SmartEdu`);

@@ -547,6 +547,11 @@ ALTER TABLE seances
 -- Colonne pour tracker si l'email a été envoyé (pour les tentatives REUSSI et ECHOUE)
 ALTER TABLE tentatives_examen
   ADD COLUMN IF NOT EXISTS email_envoye BOOLEAN NOT NULL DEFAULT FALSE;
+  -- ok
+  ALTER TABLE paiements 
+ALTER COLUMN statut TYPE VARCHAR(30);
+ALTER TABLE seances 
+ALTER COLUMN statut_paiement TYPE VARCHAR(30);
 
 -- Colonne pour tracker si l'email certificat a été envoyé
 ALTER TABLE certificats
